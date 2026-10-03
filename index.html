@@ -1,0 +1,1204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bank & OD Control</title>
+<meta name="description" content="Monthly bank statement import, OD control and cash-flow forecast">
+<!-- Libraries (loaded once, then cached by the browser). All statement reading happens on this computer. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+<style>
+:root{--bg:#f3f5f8;--card:#fff;--ink:#17202b;--mut:#667085;--line:#e4e8ee;--pri:#0b5cad;--pri2:#e8f1fb;--ok:#15803d;--okb:#e7f6ec;--warn:#b45309;--warnb:#fff4e0;--bad:#b91c1c;--badb:#fdecec;--pur:#5b21b6;--purb:#efeafe;--nav:#10233b}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f141b;--card:#161d27;--ink:#e6ebf2;--mut:#98a2b3;--line:#263142;--pri:#5aa2f0;--pri2:#16283d;--ok:#4ade80;--okb:#12301f;--warn:#fbbf24;--warnb:#33260f;--bad:#f87171;--badb:#3a1616;--pur:#c4b5fd;--purb:#2a2140;--nav:#0b1624}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+a{color:var(--pri)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 16px;background:var(--nav);color:#fff;flex-wrap:wrap}
+.brand{display:flex;gap:10px;align-items:center}.brand small{display:block;opacity:.7;font-size:11px}
+.logo{width:34px;height:34px;border-radius:8px;background:#1f6fd1;display:grid;place-items:center;font-weight:800;font-size:13px}
+.top select{padding:5px 8px;border-radius:6px;border:0;max-width:260px;background:#fff;color:#17202b}
+.top label{font-size:12px}
+nav{display:flex;gap:2px;overflow-x:auto;background:var(--card);border-bottom:1px solid var(--line);padding:0 8px;position:sticky;top:0;z-index:5}
+nav a{padding:11px 11px;color:var(--mut);text-decoration:none;white-space:nowrap;border-bottom:2px solid transparent;font-weight:500}
+nav a.on{color:var(--pri);border-color:var(--pri)}
+nav .cnt{background:var(--bad);color:#fff;border-radius:9px;padding:0 6px;font-size:11px;margin-left:4px}
+main{max-width:1240px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 14px}h2{font-size:15px;margin:0 0 10px}
+h3{font-size:12px;margin:14px 0 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));margin-bottom:12px}
+.g2{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));margin-bottom:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px;min-width:0}
+.g2>.card,.grid>.card{margin-bottom:0}
+.kpi .l{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;display:flex;justify-content:space-between;gap:6px;align-items:flex-start}
+.kpi .v{font-size:18px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums;overflow-wrap:break-word}
+.kpi .s{font-size:12px;color:var(--mut)}
+.neg{color:var(--bad)}.pos{color:var(--ok)}.warn{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-size:11px;text-transform:uppercase;color:var(--mut);background:var(--card);position:sticky;top:0;z-index:1}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.tot td{font-weight:700;border-top:2px solid var(--line)}
+tr.dim td{opacity:.5}
+.tw{overflow:auto;max-height:540px;border:1px solid var(--line);border-radius:8px}
+.b{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;letter-spacing:.04em;vertical-align:middle;white-space:nowrap}
+.b-ACTUAL{background:var(--okb);color:var(--ok)}.b-EXPECTED{background:var(--warnb);color:var(--warn)}.b-PLANNED{background:var(--purb);color:var(--pur)}.b-FORECAST{background:var(--pri2);color:var(--pri)}
+.b-red{background:var(--badb);color:var(--bad)}.b-grey{background:var(--line);color:var(--mut)}
+button,.btn{font:inherit;padding:7px 12px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;text-decoration:none;display:inline-block}
+button.p,.btn.p{background:var(--pri);border-color:var(--pri);color:#fff}button.d{color:var(--bad)}button:disabled{opacity:.45;cursor:not-allowed}
+button.sm{padding:3px 8px;font-size:12px}
+input,select,textarea{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);max-width:100%}
+td select,td input{font-size:12px;padding:3px 5px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sb{justify-content:space-between}
+.form{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));align-items:end}
+.form label{display:grid;gap:3px;font-size:12px;color:var(--mut)}
+.form label.ck{display:flex;gap:6px;align-items:center}
+.al{border-left:5px solid var(--mut);padding:11px 14px;border-radius:6px;margin-bottom:8px;background:var(--bg)}
+.al.high{border-color:var(--bad);background:var(--badb)}.al.att{border-color:var(--warn);background:var(--warnb)}.al.ok{border-color:var(--ok);background:var(--okb)}.al.info{border-color:var(--pri);background:var(--pri2)}
+.al .t{font-weight:700;margin-bottom:3px}.al .a{margin-top:6px;font-size:13px}.al .a b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.04em;opacity:.8}
+.drop{border:2px dashed var(--line);border-radius:12px;padding:34px 16px;text-align:center;background:var(--card)}
+.drop.on{border-color:var(--pri);background:var(--pri2)}
+.muted{color:var(--mut)}.small{font-size:12px}
+.chart{position:relative;height:280px}
+.steps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.steps span{font-size:12px;padding:4px 9px;border-radius:12px;background:var(--card);border:1px solid var(--line);color:var(--mut)}
+.steps span.on{background:var(--pri);border-color:var(--pri);color:#fff}
+.steps span.done{background:var(--okb);color:var(--ok);border-color:transparent}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:8px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50;max-width:92vw}
+#toast.on{opacity:1}
+.up{color:var(--bad);font-weight:600}.dn{color:var(--ok);font-weight:600}
+details>summary{cursor:pointer;font-weight:600;padding:4px 0}
+.map-sel{min-width:120px;font-size:12px}
+.eq td{border:0;padding:3px 8px}.eq tr.res td{border-top:2px solid var(--ink);font-weight:700}
+ul.ins{margin:0;padding-left:18px}ul.ins li{margin:4px 0}
+@media print{nav,.top .topr,.noprint{display:none!important}body{background:#fff;color:#000}.card{break-inside:avoid;border-color:#ccc}.tw{max-height:none;overflow:visible}}
+@media (max-width:600px){main{padding:10px}.kpi .v{font-size:17px}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">OD</span><div><b id="orgName">Bank &amp; OD Control</b><small>Monthly bank statements → management information</small></div></div>
+  <div class="topr"><label>Account&nbsp; <select id="accSel" data-chg="accSel"></select></label></div>
+</header>
+<nav id="nav"></nav>
+<main id="main"><p class="muted">Loading…</p></main>
+<div id="toast"></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   BANK & OD CONTROL — single-file app (v1.0)
+   Layers (top → bottom of this file):
+     1 CONFIG      categories, default rules, plan types, settings
+     2 UTIL        dates, amounts, formatting
+     3 IMPORT      file reading (PDF/CSV/Excel), header detection, column
+                   mapping, extraction, validation, duplicate keys
+     4 CLASSIFY    keyword rules (user rules first, then built-in)
+     5 STORAGE     IndexedDB behind an async interface (swappable later
+                   for Firebase/Supabase without touching the UI)
+     6 STATE       in-memory state + derived running balances
+     7 ANALYTICS   period stats, comparisons, insights, patterns
+     8 FORECAST    projection, OD breach analysis, action center
+     9 UI          pages, events
+   Data kinds are kept separate everywhere:
+     ACTUAL   = imported, confirmed bank transactions
+     EXPECTED = committed but not yet in the bank (customer collections,
+                cheques received/issued)
+     PLANNED  = management plans (scheduled payments/expenses)
+     FORECAST = calculated by the system
+   ===================================================================== */
+
+/* ---------- 1. CONFIG ---------- */
+// Spec note: "Bank Charges" was listed under both EXPENSE and OTHER — kept once (EXPENSE).
+// OD Interest moved to EXPENSE: it is a real cost of the business.
+// "Returned Cheque" added under INCOME so a bounced customer cheque reverses the income it created.
+const CATS=[
+ ['Customer Collection','INCOME'],['Sales Collection','INCOME'],['Incoming Cheque','INCOME'],['Bank Transfer In','INCOME'],['Other Income','INCOME'],['Returned Cheque','INCOME'],
+ ['Supplier Payment','PAYMENT'],['Purchase Payment','PAYMENT'],['Outgoing Cheque','PAYMENT'],['Bank Transfer Out','PAYMENT'],
+ ['Salary','EXPENSE'],['Electricity','EXPENSE'],['Fuel','EXPENSE'],['Transport','EXPENSE'],['Rent','EXPENSE'],['Maintenance','EXPENSE'],['Marketing','EXPENSE'],['Bank Charges','EXPENSE'],['OD Interest','EXPENSE'],['Other Expenses','EXPENSE'],
+ ['Internal Transfer','OTHER'],['Loan','OTHER'],['Needs Review','OTHER']];
+const GROUP=Object.fromEntries(CATS);
+const GROUP_LABEL={INCOME:'Income',PAYMENT:'Purchases / payments',EXPENSE:'Expenses',OTHER:'Other (loans, own transfers, unreviewed)'};
+
+const PLAN_KINDS={
+ COLLECTION:{label:'Expected customer collection',sign:1,type:'EXPECTED',flex:false},
+ CHQ_IN:{label:'Expected incoming cheque',sign:1,type:'EXPECTED',flex:false},
+ CHQ_OUT:{label:'Issued outgoing cheque',sign:-1,type:'EXPECTED',flex:false},
+ SUPPLIER:{label:'Scheduled supplier / purchase payment',sign:-1,type:'PLANNED',flex:true},
+ EXPENSE:{label:'Scheduled expense',sign:-1,type:'PLANNED',flex:false},
+ INFLOW:{label:'Planned other inflow (loan, capital)',sign:1,type:'PLANNED',flex:false}};
+
+// Built-in keyword rules, checked in this order AFTER the user's own rules.
+// d: in = money in only, out = money out only, any = both.
+const DEFAULT_RULES=[
+ {w:'RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER',d:'out',c:'Returned Cheque'},
+ {w:'RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER',d:'in',c:'Outgoing Cheque'},
+ {w:'OWN ACCOUNT,OWN A/C,INTERNAL TRANSFER,INTER ACCOUNT,SWEEP',d:'any',c:'Internal Transfer'},
+ {w:'LOAN,TERM LOAN,LEASE',d:'any',c:'Loan'},
+ {w:'SALARY,SALARIES,PAYROLL,EPF,ETF,WAGES',d:'out',c:'Salary'},
+ {w:'CEB,LECO,ELECTRICITY',d:'out',c:'Electricity'},
+ {w:'FUEL,CEYPETCO,LIOC,FILLING,PETROL,DIESEL',d:'out',c:'Fuel'},
+ {w:'RENT',d:'out',c:'Rent'},
+ {w:'OD INTEREST,OD INT,DEBIT INTEREST,INTEREST',d:'out',c:'OD Interest'},
+ {w:'CHARGE,CHARGES,COMMISSION,FEE,FEES,STAMP DUTY,SMS ALERT,DEBIT TAX',d:'out',c:'Bank Charges'},
+ {w:'REPAIR,REPAIRS,MAINTENANCE',d:'out',c:'Maintenance'},
+ {w:'ADVERT,ADVERTISING,MARKETING,PROMOTION',d:'out',c:'Marketing'},
+ {w:'TRANSPORT,LORRY,FREIGHT,COURIER,HIRE',d:'out',c:'Transport'},
+ {w:'INTEREST',d:'in',c:'Other Income'},
+ {w:'CASH DEP,CASH DEPOSIT,CDM',d:'in',c:'Sales Collection'},
+ {w:'CHQ,CHEQUE,CLEARING,CLG,CHK',d:'in',c:'Incoming Cheque'},
+ {w:'CHQ,CHEQUE,CLEARING,CLG,CHK',d:'out',c:'Outgoing Cheque'},
+ {w:'CEFT,SLIPS,TRANSFER,TRF,FUND TRANSFER,LANKAPAY,RTGS,IBT',d:'in',c:'Bank Transfer In'},
+ {w:'CEFT,SLIPS,TRANSFER,TRF,FUND TRANSFER,LANKAPAY,RTGS,IBT',d:'out',c:'Bank Transfer Out'}];
+
+const DEFAULT_SETTINGS={id:'main',org:'',fyStart:4,dateOrder:'AUTO',highlight:15,horizon:60,baseline:false,mappings:{}};
+const RET_RX=/\b(RETURN|RETURNED|RTN|UNPAID|DISHONOU?RED|REFER TO DRAWER)\b/i;
+const COLORS={pri:'#1f6fd1',ok:'#16a34a',bad:'#dc2626',warn:'#d97706',pur:'#7c3aed',grey:'#94a3b8',teal:'#0d9488',pink:'#db2777'};
+const PALETTE=['#1f6fd1','#16a34a','#d97706','#7c3aed','#dc2626','#0d9488','#db2777','#64748b','#ca8a04','#2563eb','#9333ea','#059669'];
+
+/* ---------- 2. UTIL ---------- */
+const $=(s,r=document)=>r.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+const round2=n=>Math.round((+n||0)*100)/100;
+const sum=(a,f=x=>x)=>a.reduce((s,x)=>s+(+f(x)||0),0);
+const pad=n=>String(n).padStart(2,'0');
+const digits=s=>String(s??'').replace(/\D/g,'');
+function fmt(n,dec=0){if(n==null||isNaN(n))return '–';const s=Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});return (n<0?'-':'')+s;}
+const rs=n=>n==null||isNaN(n)?'–':'Rs.\u00a0'+fmt(n);
+const pct=x=>x==null||!isFinite(x)?'–':(x*100).toFixed(Math.abs(x)<0.1?1:0)+'%';
+function short(n){const a=Math.abs(n);const s=a>=1e6?(a/1e6).toFixed(a>=1e7?1:2)+'M':a>=1e3?(a/1e3).toFixed(0)+'K':a.toFixed(0);return (n<0?'-':'')+s;}
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONTHS={JAN:1,FEB:2,MAR:3,APR:4,MAY:5,JUN:6,JUL:7,AUG:8,SEP:9,OCT:10,NOV:11,DEC:12};
+const iso=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+const toD=s=>{const[y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d);};
+const addDays=(s,n)=>{const d=toD(s);d.setDate(d.getDate()+n);return iso(d);};
+const addMonths=(s,n)=>{const d=toD(s);d.setDate(1);d.setMonth(d.getMonth()+n);return iso(d);};
+const daysBetween=(a,b)=>Math.round((toD(b)-toD(a))/864e5);
+const monthKey=s=>s.slice(0,7);
+const monthLabel=k=>MON[+k.slice(5,7)-1]+' '+k.slice(0,4);
+const monthEnd=k=>{const[y,m]=k.slice(0,7).split('-').map(Number);return iso(new Date(y,m,0));};
+const dmy=s=>s?s.slice(8,10)+'/'+s.slice(5,7)+'/'+s.slice(0,4):'–';
+const dm=s=>s?s.slice(8,10)+'/'+s.slice(5,7):'';
+const todayIso=()=>iso(new Date());
+function mkDate(y,m,d){if(y<100)y+=2000;if(!(m>=1&&m<=12&&d>=1&&d<=31))return null;if(y<1990||y>2100)return null;const dt=new Date(y,m-1,d);return dt.getMonth()===m-1?iso(dt):null;}
+
+/** Parses the many date styles banks use. order = 'DMY' (Sri Lanka default) or 'MDY'. */
+function parseDate(v,order='DMY'){
+ if(v==null||v==='')return null;
+ if(typeof v==='number'){
+  if(v>20000&&v<80000){const d=new Date(Date.UTC(1899,11,30)+Math.round(v)*864e5);return mkDate(d.getUTCFullYear(),d.getUTCMonth()+1,d.getUTCDate());}
+  const s=String(v);if(/^\d{8}$/.test(s))return mkDate(+s.slice(0,4),+s.slice(4,6),+s.slice(6));return null;}
+ if(v instanceof Date)return isNaN(v)?null:iso(v);
+ let s=String(v).trim().toUpperCase();if(!s||s.length>24)return null;
+ s=s.replace(/[T\s]+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(\s*[AP]M)?Z?$/,'').trim();
+ let m;
+ if((m=s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/)))return mkDate(+m[1],+m[2],+m[3]);
+ if((m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2}|\d{4})$/)))return order==='MDY'?mkDate(+m[3],+m[1],+m[2]):mkDate(+m[3],+m[2],+m[1]);
+ if((m=s.match(/^(\d{1,2})[-\/.\s]?([A-Z]{3})[A-Z]*[-\/.\s,]*(\d{2}|\d{4})$/)))return MONTHS[m[2]]?mkDate(+m[3],MONTHS[m[2]],+m[1]):null;
+ if((m=s.match(/^([A-Z]{3})[A-Z]*[\s\-.]+(\d{1,2}),?[\s\-.]+(\d{2}|\d{4})$/)))return MONTHS[m[1]]?mkDate(+m[3],MONTHS[m[1]],+m[2]):null;
+ if((m=s.match(/^(\d{4})(\d{2})(\d{2})$/)))return mkDate(+m[1],+m[2],+m[3]);
+ return null;
+}
+/** Looks at a whole date column to decide day-first vs month-first. */
+function detectOrder(vals,fallback){
+ let dmyHits=0,mdyHits=0;
+ for(const v of vals){if(typeof v!=='string')continue;const m=v.trim().match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.]\d{2,4}/);if(!m)continue;if(+m[1]>12)dmyHits++;if(+m[2]>12)mdyHits++;}
+ if(dmyHits&&!mdyHits)return 'DMY';if(mdyHits&&!dmyHits)return 'MDY';
+ return fallback&&fallback!=='AUTO'?fallback:'DMY';
+}
+/** Returns a signed number or null. "1,250.00 DR", "(1,250.00)" and "-1250" are negative. */
+function parseAmount(v){
+ if(v==null||v==='')return null;
+ if(typeof v==='number')return isFinite(v)?v:null;
+ let s=String(v).toUpperCase().trim();if(!s||/^[-–—.]+$/.test(s))return null;
+ if(s.length>30)return null;
+ let neg=false;
+ if(/^\(.*\)$/.test(s.replace(/\s*(CR|DR)$/,'')))neg=true;
+ if(/(^|[\s\d.])DR\.?$/.test(s)||/^DR\b/.test(s))neg=true;
+ const core=s.replace(/^(RS\.?|LKR)\s*/,'');
+ if(/^-/.test(core)||/\d-\s*$/.test(core))neg=true;
+ s=core.replace(/RS\.?|LKR|CR\.?|DR\.?|[(),\s]/g,'').replace(/[-–]/g,'');
+ if(!/^\d*\.?\d+$/.test(s))return null;
+ const n=parseFloat(s);return neg?-n:n;
+}
+const isAmountText=c=>typeof c==='number'?true:(parseAmount(c)!==null&&/[.,]/.test(String(c)));
+
+/* ---------- 3. IMPORT ENGINE ---------- */
+const FIELDS=[['','— ignore —'],['date','Date'],['desc','Description'],['dr','Debit (money out)'],['cr','Credit (money in)'],['amt','Amount (+ in / − out)'],['drcr','DR/CR flag'],['bal','Balance'],['chq','Cheque no.'],['ref','Reference']];
+// Order matters: a header cell is given to the first field that matches.
+const HDR=[
+ ['drcr',['dr/cr','cr/dr','d/c','dr cr','cr dr','debit/credit','credit/debit','dr or cr']],
+ ['date',['transaction date','txn date','tran date','trans date','posting date','post date','value date','date']],
+ ['bal',['running balance','balance']],
+ ['chq',['cheque','chq','instrument','check no']],
+ ['ref',['reference','ref no','ref','transaction id','tran id','txn id','doc no','journal no']],
+ ['dr',['debit','debits','withdrawal','withdrawals','dr','paid out','payments','money out']],
+ ['cr',['credit','credits','deposit','deposits','cr','paid in','receipts','money in']],
+ ['amt',['amount','transaction amount','txn amount']],
+ ['desc',['description','particulars','narration','narrative','details','remarks','transaction','memo']]];
+const normH=s=>String(s??'').toLowerCase().replace(/[^a-z\/ ]+/g,' ').replace(/\s+/g,' ').trim();
+function kwMatch(h,k){if(!h)return false;if(k.length<=3)return h===k||(h.length<=14&&h.split(/[ \/]/).includes(k));return h.includes(k);}
+const headerSig=row=>(row||[]).map(normH).join('|');
+
+function detectHeader(rows){
+ let best=null;const lim=Math.min(rows.length,80);
+ for(let i=0;i<lim;i++){
+  const map={};let score=0;
+  (rows[i]||[]).forEach((c,j)=>{if(typeof c!=='string')return;const h=normH(c);if(!h||h.length>40)return;
+   for(const[f,kws]of HDR){if(map[f]!=null)continue;if(kws.some(k=>kwMatch(h,k))){map[f]=j;score++;break;}}});
+  const ok=map.date!=null&&(map.dr!=null||map.cr!=null||map.amt!=null);
+  if(ok&&(!best||score>best.score))best={idx:i,score,map};
+ }
+ return best;
+}
+/** Used when no header row is recognised: guesses columns from their content. */
+function guessColumns(rows){
+ const sample=rows.slice(0,250);const n=Math.max(0,...sample.map(r=>r.length));
+ const dc=Array(n).fill(0),nc=Array(n).fill(0),tl=Array(n).fill(0);
+ sample.forEach(r=>r.forEach((c,j)=>{if(parseDate(c,'DMY'))dc[j]++;else if(isAmountText(c))nc[j]++;else tl[j]+=String(c).length;}));
+ const map={};const dj=dc.indexOf(Math.max(...dc,0));if(dj>=0&&dc[dj]>0)map.date=dj;
+ const nums=nc.map((v,j)=>[v,j]).filter(([v,j])=>v>=Math.max(2,(dc[dj]||0)*0.3)&&j!==dj).map(x=>x[1]);
+ if(nums.length>=3){map.dr=nums[nums.length-3];map.cr=nums[nums.length-2];map.bal=nums[nums.length-1];}
+ else if(nums.length===2){map.amt=nums[0];map.bal=nums[1];}else if(nums.length===1)map.amt=nums[0];
+ const tj=tl.map((v,j)=>[v,j]).filter(([v,j])=>j!==dj&&!nums.includes(j)).sort((a,b)=>b[0]-a[0])[0];if(tj&&tj[0]>0)map.desc=tj[1];
+ return map;
+}
+function validateMap(rows,hIdx,map){
+ const m={...map};
+ if(m.drcr!=null){const vals=rows.slice(hIdx+1,hIdx+60).map(r=>String(r[m.drcr]??'').trim().toUpperCase()).filter(Boolean);
+  const good=vals.filter(v=>/^(DR|CR|D|C|DEBIT|CREDIT)\.?$/.test(v)).length;if(!vals.length||good/vals.length<0.6)delete m.drcr;}
+ return m;
+}
+
+async function readPdf(buf){
+ if(!window.pdfjsLib)throw new Error('The PDF reader did not load. Check the internet connection and reload the page.');
+ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+ const lines=[];let chars=0;
+ for(let p=1;p<=pdf.numPages;p++){
+  const page=await pdf.getPage(p);const tc=await page.getTextContent();
+  const items=tc.items.filter(it=>it.str&&it.str.trim()).map(it=>({s:it.str.trim(),x:it.transform[4],y:it.transform[5],w:it.width||it.str.length*4}));
+  chars+=sum(items,i=>i.s.length);
+  const pl=[];
+  for(const it of items.sort((a,b)=>b.y-a.y)){let L=pl.find(l=>Math.abs(l.y-it.y)<3);if(!L){L={y:it.y,items:[]};pl.push(L);}L.items.push(it);}
+  pl.sort((a,b)=>b.y-a.y);
+  for(const L of pl){L.items.sort((a,b)=>a.x-b.x);const cells=[];
+   for(const it of L.items){const last=cells[cells.length-1];
+    if(last&&it.x-last.x2<4){last.s+=(it.x-last.x2>0.8?' ':'')+it.s;last.x2=Math.max(last.x2,it.x+it.w);}else cells.push({s:it.s,x:it.x,x2:it.x+it.w});}
+   lines.push({page:p,cells});}
+ }
+ if(chars<60)throw new Error('This PDF has no readable text — it is probably a scanned image. Download the statement as CSV/Excel (or a normal PDF) from online banking.');
+ const rowsRaw=lines.map(l=>l.cells.map(c=>c.s));
+ const h=detectHeader(rowsRaw);
+ if(!h)return{rows:rowsRaw,preText:rowsRaw.slice(0,20).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:false};
+ // Align every text piece to the nearest header column (by overlap, numbers by right edge).
+ const H=lines[h.idx].cells;const hdrText=H.map(c=>c.s).join('|');const rows=[H.map(c=>c.s)];
+ for(let i=h.idx+1;i<lines.length;i++){
+  const L=lines[i];if(L.cells.map(c=>c.s).join('|')===hdrText)continue;
+  const row=H.map(()=>'');
+  for(const c of L.cells){const num=isAmountText(c.s);let bj=0,bd=Infinity;
+   H.forEach((hc,j)=>{const ov=Math.min(c.x2,hc.x2)-Math.max(c.x,hc.x);const d=ov>0?-ov:(num?Math.abs(c.x2-hc.x2):Math.abs(c.x-hc.x));if(d<bd){bd=d;bj=j;}});
+   row[bj]=row[bj]?row[bj]+' '+c.s:c.s;}
+  rows.push(row);
+ }
+ return{rows,preText:rowsRaw.slice(0,h.idx+1).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:true};
+}
+function readSheet(name,buf){
+ if(!window.XLSX)throw new Error('The spreadsheet reader did not load. Check the internet connection and reload the page.');
+ const isCsv=/\.(csv|txt)$/i.test(name);
+ // CSV is read as plain text so "02/09/2026" is never turned into 9 Feb by US-style guessing.
+ const wb=isCsv?XLSX.read(new TextDecoder('utf-8').decode(buf).replace(/^﻿/,''),{type:'string',raw:true}):XLSX.read(buf,{type:'array'});
+ let best=[];
+ for(const n of wb.SheetNames){const r=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:''});if(r.length>best.length)best=r;}
+ const rows=best.map(r=>r.map(c=>typeof c==='string'?c.trim():c));
+ return{rows,preText:rows.slice(0,20).map(r=>r.join(' ')).join('\n'),kind:isCsv?'csv':'excel'};
+}
+function lastNum(r){for(let j=r.length-1;j>=0;j--){const v=parseAmount(r[j]);if(v!==null&&/\d/.test(String(r[j])))return v;}return null;}
+const OPEN_RX=/opening balance|balance b\/?f|brought forward|\bb\/f\b|balance brought|previous balance|beginning balance|balance forward/;
+const CLOSE_RX=/closing balance|balance c\/?f|carried forward|\bc\/f\b|ending balance/;
+
+/** Turns aligned rows into transactions. Nothing is dropped silently: problems go to `issues`. */
+function extract(rows,hIdx,map,orderPref){
+ const get=(r,f)=>map[f]!=null&&map[f]!==''?(r[map[f]]??''):'';
+ const order=detectOrder(rows.slice(hIdx+1,hIdx+400).map(r=>get(r,'date')),orderPref);
+ const hdrSig=hIdx>=0?rows[hIdx].map(String).join('|'):null;
+ const out=[],issues=[];let opening=null,closing=null;
+ for(let i=hIdx+1;i<rows.length;i++){
+  const r=rows[i]||[];if(!r.some(c=>String(c).trim()))continue;
+  if(hdrSig&&r.map(String).join('|')===hdrSig)continue;
+  const all=r.map(String).join(' ').toLowerCase();
+  const d=parseDate(get(r,'date'),order);
+  const desc=String(get(r,'desc')??'').replace(/\s+/g,' ').trim();
+  const balV=parseAmount(get(r,'bal'));
+  if(OPEN_RX.test(all)){if(opening==null)opening=balV!=null?balV:lastNum(r);continue;}
+  if(CLOSE_RX.test(all)){const v=balV!=null?balV:lastNum(r);if(v!=null)closing=v;continue;}
+  let dr=0,cr=0,bad=false;
+  if(map.dr!=null||map.cr!=null){
+   const rd=get(r,'dr'),rc=get(r,'cr');const a=parseAmount(rd),b=parseAmount(rc);
+   if(String(rd).trim()&&a===null&&!/^[-–]+$/.test(String(rd).trim()))bad=true;if(String(rc).trim()&&b===null&&!/^[-–]+$/.test(String(rc).trim()))bad=true;
+   dr=a?Math.abs(a):0;cr=b?Math.abs(b):0;
+  }else if(map.amt!=null){
+   const raw=get(r,'amt');const a=parseAmount(raw);if(String(raw).trim()&&a===null)bad=true;
+   if(a!=null){const f=String(get(r,'drcr')).toUpperCase().trim();
+    if(/^(DR|D|DEBIT)\b/.test(f))dr=Math.abs(a);else if(/^(CR|C|CREDIT)\b/.test(f))cr=Math.abs(a);else if(a<0)dr=-a;else cr=a;}
+  }
+  if(!d){
+   if(!dr&&!cr){if(desc&&out.length&&balV==null)out[out.length-1].desc+=' '+desc;continue;}
+   issues.push({row:i+1,msg:'Amount found but the date is missing or unreadable',text:r.join(' | ')});continue;
+  }
+  if(bad)issues.push({row:i+1,msg:'Amount could not be read',text:r.join(' | ')});
+  if(!dr&&!cr)continue;
+  if(dr&&cr)issues.push({row:i+1,msg:'Row has both a debit and a credit',text:desc});
+  let chq=digits(get(r,'chq'));
+  if(!chq){const m=desc.toUpperCase().match(/\b(?:CHQ|CHEQUE|CHK|CHECK)\b[^0-9]{0,12}(\d{5,8})\b/);if(m)chq=m[1];}
+  out.push({date:d,desc,dr:round2(dr),cr:round2(cr),bal:balV,chq,ref:String(get(r,'ref')??'').trim(),row:i+1});
+ }
+ return{out,opening,closing,issues,order};
+}
+function detectPeriod(text,order){
+ const D='(\\d{1,2}[\\/\\-.]\\d{1,2}[\\/\\-.]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}[ \\-][A-Za-z]{3,9}[ \\-,]+\\d{2,4})';
+ const m=String(text).match(new RegExp(D+'\\s*(?:to|-|–|till|until)\\s*'+D,'i'));
+ if(!m)return null;const a=parseDate(m[1],order),b=parseDate(m[2],order);
+ return a&&b&&a<=b?{from:a,to:b}:null;
+}
+function detectAccNo(text){const m=String(text).match(/(?:a\/c|acc(?:oun)?t?)\s*(?:no|number|#)?\.?\s*[:\-]?\s*([0-9][0-9\- ]{5,22}[0-9])/i);return m?digits(m[1]):'';}
+function guessBank(text){const B=[['commercial bank','Commercial Bank'],['hatton national','HNB'],['hnb','HNB'],['sampath','Sampath Bank'],['bank of ceylon','Bank of Ceylon'],['boc','Bank of Ceylon'],["people's bank",'People\'s Bank'],['peoples bank','People\'s Bank'],['seylan','Seylan Bank'],['ndb','NDB'],['dfcc','DFCC'],['nations trust','Nations Trust Bank'],['pan asia','Pan Asia Bank'],['union bank','Union Bank'],['amana','Amana Bank'],['cargills bank','Cargills Bank'],['hsbc','HSBC'],['standard chartered','Standard Chartered']];const t=String(text).toLowerCase();const f=B.find(([k])=>t.includes(k));return f?f[1]:'';}
+
+/** Orders rows, fixes balance signs, checks running balance and reconciliation. */
+function finalize(ex,preText){
+ let{out,opening,closing}=ex;out=out.map(t=>({...t}));const notes=[];
+ if(out.length>2){let asc=0,desc=0;for(let i=1;i<out.length;i++){if(out[i].date>out[i-1].date)asc++;else if(out[i].date<out[i-1].date)desc++;}
+  if(desc>asc){out.reverse();notes.push('The statement was listed newest-first; it has been put in date order.');}}
+ const hasBal=out.some(t=>t.bal!=null);
+ if(hasBal){let norm=0,flip=0;
+  for(let i=1;i<out.length;i++){const a=out[i-1].bal,b=out[i].bal;if(a==null||b==null)continue;const e=out[i].cr-out[i].dr;if(Math.abs(b-a-e)<0.51)norm++;else if(Math.abs(b-a+e)<0.51)flip++;}
+  if(flip>norm){out.forEach(t=>{if(t.bal!=null)t.bal=-t.bal;});if(opening!=null)opening=-opening;if(closing!=null)closing=-closing;
+   notes.push('This bank prints overdraft balances as positive numbers. They were converted to negative (overdrawn) so the OD figures are correct.');}}
+ if(opening==null&&out.length&&out[0].bal!=null){opening=round2(out[0].bal-out[0].cr+out[0].dr);notes.push('Opening balance was not printed; it was calculated from the first transaction.');}
+ const lastWithBal=[...out].reverse().find(t=>t.bal!=null);
+ if(closing==null&&lastWithBal)closing=lastWithBal.bal;
+ const breaks=[];let prev=opening;
+ for(const t of out){if(t.bal!=null&&prev!=null&&Math.abs(prev+t.cr-t.dr-t.bal)>0.51)breaks.push({row:t.row,date:t.date,desc:t.desc,expected:round2(prev+t.cr-t.dr),shown:t.bal});prev=t.bal!=null?t.bal:(prev!=null?prev+t.cr-t.dr:null);}
+ const cr=round2(sum(out,t=>t.cr)),dr=round2(sum(out,t=>t.dr));
+ const recon=opening!=null&&closing!=null?round2(opening+cr-dr-closing):null;
+ const dates=out.map(t=>t.date).sort();
+ let from=dates[0]||null,to=dates[dates.length-1]||null;
+ const per=detectPeriod(preText,ex.order);
+ if(per&&from&&per.from<=from&&per.to>=to&&daysBetween(per.from,per.to)<=93){from=per.from;to=per.to;}
+ return{out,opening,closing,cr,dr,recon,breaks,notes,from,to,hasBal,issues:ex.issues,order:ex.order};
+}
+const normDesc=s=>String(s).toUpperCase().replace(/[^A-Z0-9]/g,'');
+const txKey=(acc,t)=>[acc,t.date,(+t.dr).toFixed(2),(+t.cr).toFixed(2),normDesc(t.desc).slice(0,40),t.chq||'',t.ref||'',t.bal!=null?(+t.bal).toFixed(2):''].join('|');
+
+/* ---------- 4. CLASSIFY ---------- */
+const normWords=s=>String(s).toUpperCase().replace(/[^A-Z0-9\/]+/g,' ').replace(/\s+/g,' ').trim();
+function orderedRules(){return[...S.rules.filter(r=>!r.builtin).sort((a,b)=>(b.created||0)-(a.created||0)),...S.rules.filter(r=>r.builtin).sort((a,b)=>a.ord-b.ord)];}
+function classify(t){
+ const U=' '+normWords(t.desc)+' ';const inflow=t.cr>t.dr;
+ for(const r of orderedRules()){
+  if(r.dir==='in'&&!inflow)continue;if(r.dir==='out'&&inflow)continue;
+  const ws=String(r.words).split(',').map(normWords).filter(Boolean);
+  if(ws.some(w=>U.includes(' '+w+' ')))return{cat:r.cat,party:r.party||'',src:r.builtin?'auto':'rule'};
+ }
+ return{cat:'Needs Review',party:'',src:'none'};
+}
+const STOP=new Set(['TO','FROM','THE','OF','NO','REF','CHQ','CHEQUE','TRF','CEFT','SLIPS','PAYMENT','DEP','DEPOSIT','TRANSFER','FUND','FT','BY','AND','FOR','ACC','A/C','POS','LTD','PVT','PLC','IBT','INV','ONLINE','MOBILE']);
+function suggestKw(desc){const w=normWords(desc).split(' ').filter(x=>x.length>=3&&!/\d/.test(x)&&!STOP.has(x));return w.slice(0,2).join(' ');}
+
+/* ---------- 5. STORAGE (async; swap for Firebase/Supabase later) ---------- */
+const STORES=['accounts','statements','txns','rules','plans','files','settings'];
+const IDB={
+ db:null,
+ open(){return new Promise((res,rej)=>{const q=indexedDB.open('bank-od-control',1);
+  q.onupgradeneeded=()=>{const d=q.result;STORES.forEach(s=>{if(!d.objectStoreNames.contains(s))d.createObjectStore(s,{keyPath:'id'});});};
+  q.onsuccess=()=>{this.db=q.result;res();};q.onerror=()=>rej(q.error);});},
+ _w(store,fn){return new Promise((res,rej)=>{const t=this.db.transaction(store,'readwrite');fn(t.objectStore(store));t.oncomplete=()=>res();t.onerror=()=>rej(t.error);t.onabort=()=>rej(t.error);});},
+ all(s){return new Promise((res,rej)=>{const q=this.db.transaction(s).objectStore(s).getAll();q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});},
+ get(s,id){return new Promise((res,rej)=>{const q=this.db.transaction(s).objectStore(s).get(id);q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error);});},
+ put(s,o){return this._w(s,os=>os.put(o));},
+ putMany(s,a){return this._w(s,os=>a.forEach(o=>os.put(o)));},
+ del(s,id){return this._w(s,os=>os.delete(id));},
+ delMany(s,ids){return this._w(s,os=>ids.forEach(id=>os.delete(id)));},
+ clear(s){return this._w(s,os=>os.clear());}};
+const MemDB={ // fallback when the browser blocks IndexedDB (e.g. some private windows)
+ m:Object.fromEntries(STORES.map(s=>[s,new Map()])),
+ async open(){},async all(s){return[...this.m[s].values()];},async get(s,id){return this.m[s].get(id);},
+ async put(s,o){this.m[s].set(o.id,o);},async putMany(s,a){a.forEach(o=>this.m[s].set(o.id,o));},
+ async del(s,id){this.m[s].delete(id);},async delMany(s,ids){ids.forEach(id=>this.m[s].delete(id));},async clear(s){this.m[s].clear();}};
+let DB=IDB;let MEMORY_ONLY=false;
+
+/* ---------- 6. STATE ---------- */
+const S={accounts:[],statements:[],txns:[],rules:[],plans:[],settings:{...DEFAULT_SETTINGS},points:{},lastDate:{},
+ ui:{acc:'ALL',page:'dash',tf:{q:'',m:'',cat:'',stmt:''},rp:{type:'month'},trendN:6,hz:null,editPlan:null,cf:''}};
+async function loadAll(){
+ for(const k of['accounts','statements','txns','rules','plans'])S[k]=await DB.all(k);
+ const st=(await DB.all('settings')).find(x=>x.id==='main');S.settings={...DEFAULT_SETTINGS,...(st||{})};S.settings.mappings=S.settings.mappings||{};
+ if(!S.rules.some(r=>r.builtin)){const br=DEFAULT_RULES.map((r,i)=>({id:'b'+i,words:r.w,dir:r.d,cat:r.c,party:'',builtin:true,ord:i}));await DB.putMany('rules',br);S.rules.push(...br);}
+ derive();
+}
+const saveSettings=()=>DB.put('settings',S.settings);
+const txSort=(x,y)=>x.date<y.date?-1:x.date>y.date?1:(x.seq||0)-(y.seq||0);
+/** Builds each account's balance timeline: statement openings + running balance after every transaction. */
+function derive(){
+ S.points={};S.lastDate={};
+ const stById=Object.fromEntries(S.statements.map(s=>[s.id,s]));
+ for(const a of S.accounts){
+  const tx=S.txns.filter(t=>t.acc===a.id).sort(txSort);const pts=[];
+  for(const s of S.statements.filter(s=>s.acc===a.id))if(s.opening!=null)pts.push({date:addDays(s.from,-1),bal:s.opening,o:0});
+  let prev=null,prevStmt=null;
+  for(const t of tx){const s=stById[t.stmt];const base=(prevStmt!==t.stmt&&s&&s.opening!=null)?s.opening:prev;
+   const rb=t.bal!=null?t.bal:round2((base??0)+t.cr-t.dr);t.rb=rb;prev=rb;prevStmt=t.stmt;pts.push({date:t.date,bal:rb,o:1});}
+  pts.sort((x,y)=>x.date<y.date?-1:x.date>y.date?1:x.o-y.o);
+  S.points[a.id]=pts;
+  const ends=S.statements.filter(s=>s.acc===a.id).map(s=>s.to).concat(tx.map(t=>t.date)).sort();
+  S.lastDate[a.id]=ends[ends.length-1]||null;
+ }
+}
+const allAccIds=()=>S.accounts.map(a=>a.id);
+const accIds=()=>S.ui.acc==='ALL'||!S.accounts.some(a=>a.id===S.ui.acc)?allAccIds():[S.ui.acc];
+const accName=id=>(S.accounts.find(a=>a.id===id)||{}).name||'—';
+function balanceAt(acc,date){const p=S.points[acc]||[];let v=null;for(const x of p){if(x.date<=date)v=x.bal;else break;}return v;}
+function balC(ids,date){let t=0,any=false;for(const a of ids){const v=balanceAt(a,date);if(v!=null){t+=v;any=true;}}return any?round2(t):null;}
+function odUsedC(ids,date){return round2(sum(ids,a=>Math.max(0,-(balanceAt(a,date)??0))));}
+const limitC=ids=>sum(ids,a=>(S.accounts.find(x=>x.id===a)||{}).odLimit||0);
+function latestC(ids){const d=ids.map(a=>S.lastDate[a]).filter(Boolean).sort();return d[d.length-1]||null;}
+function monthsWithData(ids){return[...new Set(S.txns.filter(t=>ids.includes(t.acc)).map(t=>monthKey(t.date)))].sort();}
+
+/* ---------- 7. ANALYTICS ---------- */
+function daily(ids,from,to){
+ const days=[];for(let d=from;d<=to;d=addDays(d,1))days.push({date:d,bal:0,od:0,known:false});
+ for(const a of ids){const pts=S.points[a]||[];let k=-1;
+  days.forEach(x=>{while(k+1<pts.length&&pts[k+1].date<=x.date)k++;if(k>=0){const b=pts[k].bal;x.bal+=b;x.od+=Math.max(0,-b);x.known=true;}});}
+ return days;
+}
+const catVal=(g,cr,dr)=>g==='PAYMENT'||g==='EXPENSE'?dr-cr:cr-dr;
+function periodStats(ids,from,to){
+ const last=latestC(ids);const to2=last&&last<to?last:to;
+ const tx=S.txns.filter(t=>ids.includes(t.acc)&&t.date>=from&&t.date<=to);
+ const byCat={},byParty={},byAcc={};let cr=0,dr=0;
+ for(const t of tx){cr+=t.cr;dr+=t.dr;const g=GROUP[t.cat]||'OTHER';
+  const c=byCat[t.cat]||(byCat[t.cat]={cat:t.cat,g,cr:0,dr:0,n:0});c.cr+=t.cr;c.dr+=t.dr;c.n++;
+  if(g==='INCOME'){const p=t.party||'Unassigned';byParty[p]=(byParty[p]||0)+t.cr-t.dr;}
+  const a=byAcc[t.acc]||(byAcc[t.acc]={cr:0,dr:0,n:0});a.cr+=t.cr;a.dr+=t.dr;a.n++;}
+ const cats=Object.values(byCat).map(c=>({...c,val:catVal(c.g,c.cr,c.dr)}));
+ const gsum=g=>sum(cats.filter(c=>c.g===g),c=>c.val);
+ const income=gsum('INCOME'),pay=gsum('PAYMENT'),exp=gsum('EXPENSE');
+ const ser=to2>=from?daily(ids,from,to2).filter(x=>x.known):[];
+ const lim=limitC(ids);
+ let avg=null,min=null,max=null,odMax=null,odAvg=null;
+ if(ser.length){avg=sum(ser,x=>x.bal)/ser.length;min=ser.reduce((a,b)=>b.bal<a.bal?b:a);max=ser.reduce((a,b)=>b.bal>a.bal?b:a);odMax=ser.reduce((a,b)=>b.od>a.od?b:a);odAvg=sum(ser,x=>x.od)/ser.length;}
+ const closing=to2>=from?balC(ids,to2):null,closingOD=to2>=from?odUsedC(ids,to2):null;
+ return{from,to,to2,tx,cr,dr,net:cr-dr,cats,income,pay,exp,out:pay+exp,byParty,byAcc,ser,
+  opening:balC(ids,addDays(from,-1)),closing,avg,min,max,lim,odMax,odAvg,closingOD,
+  util:lim&&closingOD!=null?closingOD/lim:null,peakUtil:lim&&odMax?odMax.od/lim:null,
+  nr:tx.filter(t=>t.cat==='Needs Review'),ret:tx.filter(t=>t.cat==='Returned Cheque')};
+}
+const chg=(a,b)=>b?(a-b)/Math.abs(b):null;
+const weekPhrase=day=>day<=7?'the first week of the month':day<=14?'the second week':day<=21?'the third week':'the final week of the month';
+/** Management insights — every sentence is calculated from the data. */
+function insights(st,pv,pvLabel){
+ const out=[];const th=S.settings.highlight/100;
+ const say=(name,a,b,upIsBad)=>{const c=chg(a,b);if(c==null||!isFinite(c))return;
+  if(Math.abs(c)<0.005){out.push({k:'i',t:`${name} were flat compared with ${pvLabel} (${rs(a)}).`});return;}
+  const sig=Math.abs(c)>=th;const bad=upIsBad?c>0:c<0;
+  out.push({k:sig?(bad?'bad':'good'):'i',t:`${name} ${sig?'significantly ':''}${c>0?'increased':'decreased'} by ${pct(Math.abs(c))} compared with ${pvLabel} (${rs(b)} → ${rs(a)}).`});};
+ if(pv&&pv.tx.length){
+  say('Total bank credits',st.cr,pv.cr,false);
+  say('Customer and sales collections',st.income,pv.income,false);
+  say('Supplier and purchase payments',st.pay,pv.pay,true);
+  say('Operating expenses',st.exp,pv.exp,true);
+  const pc=Object.fromEntries(pv.cats.map(c=>[c.cat,c.val]));
+  const mv=st.cats.filter(c=>c.g==='EXPENSE').map(c=>({c,d:c.val-(pc[c.cat]||0)})).sort((a,b)=>b.d-a.d)[0];
+  if(mv&&mv.d>0&&pc[mv.c.cat]&&mv.d/pc[mv.c.cat]>=th)out.push({k:'bad',t:`${mv.c.cat} rose by ${rs(mv.d)} (+${pct(mv.d/pc[mv.c.cat])}) — the largest increase among expense categories.`});
+ }
+ if(st.peakUtil!=null&&st.odMax&&st.odMax.od>0){const day=+st.odMax.date.slice(8);
+  out.push({k:st.peakUtil>=0.85?'bad':st.peakUtil>=0.7?'warn':'i',t:`OD utilisation ${st.peakUtil>=0.85?'reached a high level of':'peaked at'} ${pct(st.peakUtil)} (${rs(st.odMax.od)}) on ${dmy(st.odMax.date)}, in ${weekPhrase(day)}.`});}
+ const inc=st.tx.filter(t=>GROUP[t.cat]==='INCOME'),outs=st.tx.filter(t=>['PAYMENT','EXPENSE'].includes(GROUP[t.cat]));
+ const incT=sum(inc,t=>t.cr-t.dr),outT=sum(outs,t=>t.dr-t.cr);
+ if(incT>0&&outT>0){const early=sum(inc.filter(t=>+t.date.slice(8)<=10),t=>t.cr-t.dr)/incT,late=sum(outs.filter(t=>+t.date.slice(8)>20),t=>t.dr-t.cr)/outT;
+  if(early>=0.4&&late>=0.4)out.push({k:'warn',t:`${pct(late)} of payments were made after the 20th, while ${pct(early)} of collections arrived by the 10th — several large payments occur before the next collection cycle.`});}
+ if(st.min)out.push({k:st.lim&&-st.min.bal>st.lim?'bad':'i',t:`Lowest balance was ${rs(st.min.bal)} on ${dmy(st.min.date)}${st.max?`; highest was ${rs(st.max.bal)} on ${dmy(st.max.date)}`:''}.`});
+ out.push({k:st.net<0?'warn':'good',t:st.net<0?`Net cash flow was negative: debits exceeded credits by ${rs(-st.net)}.`:`Net cash flow was positive: credits exceeded debits by ${rs(st.net)}.`});
+ if(st.ret.length)out.push({k:'bad',t:`${st.ret.length} customer cheque${st.ret.length>1?'s were':' was'} returned (${rs(sum(st.ret,t=>t.dr-t.cr))}) — follow up with the customers concerned.`});
+ if(st.nr.length)out.push({k:'warn',t:`${st.nr.length} transaction${st.nr.length>1?'s':''} (${rs(sum(st.nr,t=>t.cr+t.dr))}) are still unclassified — category figures are incomplete until they are reviewed.`});
+ return out;
+}
+/** Section 13: looks across recent complete months for timing problems. */
+function patterns(ids){
+ const last=latestC(ids);const months=monthsWithData(ids).filter(m=>last&&monthEnd(m)<=last).slice(-6);
+ if(months.length<2)return null;
+ const bl=['1st–10th','11th–20th','21st–end'];const bk=d=>d<=10?0:d<=20?1:2;
+ const inc=[0,0,0],pay=[0,0,0],sup=[0,0,0],odDay=[0,0,0];
+ const set=new Set(months);
+ for(const t of S.txns){if(!ids.includes(t.acc)||!set.has(monthKey(t.date)))continue;const b=bk(+t.date.slice(8));const g=GROUP[t.cat];
+  if(g==='INCOME')inc[b]+=t.cr-t.dr;if(g==='PAYMENT'||g==='EXPENSE')pay[b]+=t.dr-t.cr;if(g==='PAYMENT')sup[b]+=t.dr-t.cr;}
+ for(const m of months){const ser=daily(ids,m+'-01',monthEnd(m)).filter(x=>x.known);if(ser.length){const mx=ser.reduce((a,b)=>b.od>a.od?b:a);if(mx.od>0)odDay[bk(+mx.date.slice(8))]++;}}
+ const sh=a=>{const t=sum(a);return a.map(x=>t>0?x/t:0);};
+ const incS=sh(inc),payS=sh(pay),supS=sh(sup);const am=a=>a.indexOf(Math.max(...a));
+ const cards=[];
+ const sb=am(supS),ib=am(incS),pb=am(payS),ob=am(odDay);
+ if(sum(sup)>0&&sb!==ib&&supS[sb]>=0.4)cards.push({problem:`${pct(supS[sb])} of supplier/purchase payments fall between the ${bl[sb]} of each month (last ${months.length} months).`,obs:`Customer collections are concentrated between the ${bl[ib]} (${pct(incS[ib])} of collections).`,con:'Payment dates may need to be coordinated with collection timing — for example, agreeing supplier payment dates that fall after the main collection window.'});
+ else if(pb!==ib&&payS[pb]>=0.45)cards.push({problem:`${pct(payS[pb])} of all payments and expenses fall between the ${bl[pb]}.`,obs:`Collections peak between the ${bl[ib]} (${pct(incS[ib])}).`,con:'Consider spreading non-critical payments towards the collection window.'});
+ if(odDay[ob]>=Math.ceil(months.length/2)&&sum(odDay)>0)cards.push({problem:`The highest OD use of the month happened between the ${bl[ob]} in ${odDay[ob]} of the last ${months.length} months.`,obs:'This is the tightest period for the facility each month.',con:'Keep headroom for this window: avoid scheduling flexible payments into it where possible.'});
+ return{months,bl,incS,payS,supS,cards};
+}
+
+/* ---------- 8. FORECAST ---------- */
+function forecast(ids,{horizon=60,baseline=false}={}){
+ const asOf=latestC(ids);if(!asOf)return null;
+ const start=addDays(asOf,1),end=addDays(start,horizon-1);
+ const startBal=balC(ids,asOf)??0,limit=limitC(ids);
+ const events=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)).map(p=>{const k=PLAN_KINDS[p.kind]||PLAN_KINDS.EXPENSE;
+  return{...p,amt:k.sign*p.amount,type:k.type,kindLabel:k.label,eff:p.date<start?start:p.date,late:p.date<start};})
+  .filter(e=>e.eff<=end).sort((a,b)=>a.eff<b.eff?-1:a.eff>b.eff?1:b.amt-a.amt);
+ let base=0,baseInfo=null;
+ if(baseline){const ms=monthsWithData(ids).filter(m=>monthEnd(m)<=asOf).slice(-3);
+  if(ms.length){let inc=0,out=0,days=0;ms.forEach(m=>{const st=periodStats(ids,m+'-01',monthEnd(m));inc+=st.income;out+=st.out;days+=+monthEnd(m).slice(8);});base=(inc-out)/days;baseInfo={months:ms,perDay:base,total:base*horizon};}}
+ const beyond=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&p.date>end).length;
+ return{ids,asOf,start,end,horizon,startBal,limit,events,base,baseInfo,beyond,...project(events,startBal,start,end,limit,base)};
+}
+function project(events,startBal,start,end,limit,base){
+ const byDay={};events.forEach(e=>(byDay[e.eff]||(byDay[e.eff]=[])).push(e));
+ const days=[];let bal=startBal,min={bal:startBal,date:addDays(start,-1)},breach=null,peakExcess=0,peakDate=null,maxOD=Math.max(0,-startBal),maxODDate=addDays(start,-1);
+ for(let d=start;d<=end;d=addDays(d,1)){
+  const ev=byDay[d]||[];const inn=sum(ev.filter(e=>e.amt>0),e=>e.amt),out=sum(ev.filter(e=>e.amt<0),e=>-e.amt);
+  bal=bal+inn-out+base;const od=Math.max(0,-bal);days.push({date:d,bal,inn,out,od,ev});
+  if(bal<min.bal)min={bal,date:d};if(od>maxOD){maxOD=od;maxODDate=d;}
+  if(limit&&od>limit){const ex=od-limit;if(!breach)breach={date:d,excess:ex};if(ex>peakExcess){peakExcess=ex;peakDate=d;}}
+ }
+ return{days,min,breach,peakExcess,peakDate,maxOD,maxODDate,maxUtil:limit?maxOD/limit:null,endBal:bal};
+}
+/** Section 15: why the breach happens and what could be moved. Options only — nothing is executed. */
+function odAnalysis(f){
+ if(!f||!f.breach)return null;const b=f.breach.date;
+ const outs=f.events.filter(e=>e.amt<0&&e.eff<=b).sort((x,y)=>x.amt-y.amt);
+ const before=f.events.filter(e=>e.amt>0&&e.eff<=b);
+ const after=f.events.filter(e=>e.amt>0&&e.eff>b&&daysBetween(b,e.eff)<=45);
+ const flex=outs.filter(e=>e.flexible);const flexTotal=sum(flex,e=>-e.amt);
+ let target=null,cum=0;for(const e of after){cum+=e.amt;if(cum>=Math.min(flexTotal,f.peakExcess)){target=e.eff;break;}}
+ if(!target)target=after.length?after[after.length-1].eff:addDays(b,14);
+ const newDate=addDays(target,1);const endS=newDate>f.end?addDays(newDate,7):f.end;
+ const resched=flex.map(e=>({...e,newDate:e.eff>newDate?e.eff:newDate}));
+ const mv=list=>f.events.map(e=>{const r=list.find(x=>x.id===e.id);return r?{...e,eff:r.newDate}:e;});
+ const scenA=flex.length?project(mv(resched),f.startBal,f.start,endS,f.limit,f.base):null;
+ const accelDate=addDays(b,-1)<f.start?f.start:addDays(b,-1);
+ const accel=after.map(e=>({...e,newDate:accelDate}));
+ const scenB=accel.length?project(mv(accel),f.startBal,f.start,f.end,f.limit,f.base):null;
+ return{b,outs,before,after,flex,flexTotal,resched,newDate,scenA,accel,accelDate,scenB};
+}
+/** Section 16: prioritised items for management. */
+function actionItems(idsIn){
+ const items=[];const ids=idsIn||allAccIds();
+ if(!S.txns.length)return[{p:'info',t:'No bank data yet',d:'Upload the first monthly statement, or load the demo data from the dashboard.'}];
+ const today=todayIso();const sets=ids.length>1?[ids,...ids.map(i=>[i])]:[ids];let riskFound=false;
+ sets.forEach((set,si)=>{
+  const f=forecast(set,{horizon:S.settings.horizon,baseline:S.settings.baseline});if(!f)return;
+  const name=set.length>1?'all accounts combined':accName(set[0]);
+  if(!f.limit&&f.startBal<0)items.push({p:'att',t:`No OD limit is set for ${esc(name)}`,d:'OD risk cannot be measured until the approved limit is entered.',a:'Enter the approved OD limit in Settings → Bank accounts.',link:'#settings'});
+  if(f.breach){riskFound=true;const an=odAnalysis(f);
+   const rsch=an.resched.slice(0,2).map(e=>`${esc(e.party||e.kindLabel)} ${rs(-e.amt)} (${dmy(e.eff)})`).join(' and ');
+   items.push({p:'high',t:`OD limit breach projected on ${dmy(f.breach.date)} — ${esc(name)}`,
+    d:`Projected OD use exceeds the approved ${rs(f.limit)} by ${rs(f.breach.excess)}, peaking at ${rs(f.peakExcess)} over the limit on ${dmy(f.peakDate)}.`,
+    a:an.resched.length?`Review whether ${rsch}${an.resched.length>2?` and ${an.resched.length-2} other flexible payment${an.resched.length>3?'s':''}`:''} can be scheduled after ${dmy(an.newDate)}.${an.scenA&&!an.scenA.breach?' In the projection, moving the flexible payments removes the breach.':' Moving flexible payments alone does not remove the breach — also review collections and funding ('+rs(f.peakExcess)+' required).'}`:`No flexible payments are scheduled before the breach. Funding of ${rs(f.peakExcess)} or faster collections would be required.`,link:'#forecast'});
+  }else if(f.maxUtil!=null&&f.maxUtil>=0.85){riskFound=true;
+   items.push({p:'att',t:`OD utilisation projected to reach ${pct(f.maxUtil)} on ${dmy(f.maxODDate)} — ${esc(name)}`,d:`Available headroom falls to ${rs(f.limit-f.maxOD)}.`,a:'Review upcoming non-critical payments and follow up the expected collections.',link:'#forecast'});}
+  if(si===0&&f.limit){let n=0;
+   for(const e of f.events.filter(e=>e.amt<0&&e.flexible)){if(n>=3)break;
+    const col=f.events.find(c=>c.amt>0&&c.eff>e.eff&&daysBetween(e.eff,c.eff)<=10&&c.amt>=-e.amt*0.5);const day=f.days.find(d=>d.date===e.eff);
+    if(col&&day&&day.od/f.limit>=0.8){n++;items.push({p:'high',t:`${esc(e.kindLabel)} of ${rs(-e.amt)}${e.party?' ('+esc(e.party)+')':''} is scheduled on ${dmy(e.eff)}, before an expected collection of ${rs(col.amt)} on ${dmy(col.eff)}`,d:`OD utilisation on ${dmy(e.eff)} is projected at ${pct(day.od/f.limit)}.`,a:`Review whether the payment can be scheduled after ${dmy(col.eff)}.`,link:'#plans'});}}}
+ });
+ const lateIn=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&PLAN_KINDS[p.kind].sign>0&&p.date<today).sort((a,b)=>a.date<b.date?-1:1);
+ if(lateIn.length)items.push({p:'att',t:`${lateIn.length} expected receipt${lateIn.length>1?'s':''} totalling ${rs(sum(lateIn,p=>p.amount))} ${lateIn.length>1?'are':'is'} overdue`,d:`Oldest: ${esc(lateIn[0].party||'—')} due ${dmy(lateIn[0].date)}. The forecast still counts ${lateIn.length>1?'them':'it'} as coming in.`,a:'Follow up these customers, or update the expected dates in Commitments.',link:'#plans'});
+ const asOf=latestC(ids);if(asOf&&daysBetween(asOf,today)>35)items.push({p:'att',t:`Bank data is ${daysBetween(asOf,today)} days old`,d:`Latest statement ends ${dmy(asOf)}. The forecast starts from that date.`,a:'Upload the latest monthly statement.',link:'#upload'});
+ const nr=S.txns.filter(t=>ids.includes(t.acc)&&t.cat==='Needs Review');
+ if(nr.length)items.push({p:'att',t:`${nr.length} transaction${nr.length>1?'s':''} need${nr.length>1?'':'s'} a category`,d:`${rs(sum(nr,t=>t.cr+t.dr))} is not yet in the income/expense analysis.`,a:'Classify them once — the system remembers the keyword for next month.',link:'#review'});
+ const un=S.statements.filter(s=>ids.includes(s.acc)&&s.recon!=null&&Math.abs(s.recon)>=0.51);
+ if(un.length)items.push({p:'att',t:`${un.length} statement${un.length>1?'s':''} imported without reconciling`,d:un.map(s=>`${esc(s.file)} (difference ${rs(s.recon)})`).join('; '),a:'Check the file and column mapping, then Reprocess from Upload history.',link:'#history'});
+ if(asOf){const ret=S.txns.filter(t=>ids.includes(t.acc)&&t.cat==='Returned Cheque'&&daysBetween(t.date,asOf)<=60);
+  if(ret.length)items.push({p:'att',t:`${ret.length} returned cheque${ret.length>1?'s':''} in the last 60 days`,d:`Total ${rs(sum(ret,t=>t.dr-t.cr))}.`,a:'Recover the amounts and review credit terms for these customers.',link:'#cheques'});}
+ if(!riskFound&&asOf){const f=forecast(ids,{horizon:S.settings.horizon,baseline:S.settings.baseline});
+  items.push({p:'ok',t:'Projected cash flow remains within the approved OD facility',d:f?`Through ${dmy(f.end)}. Lowest projected balance ${rs(f.min.bal)} on ${dmy(f.min.date)}${f.maxUtil!=null?` (${pct(f.maxUtil)} OD use)`:''}. The projection only includes commitments entered in Commitments.`:'',link:'#forecast'});}
+ const ord={high:0,att:1,ok:2,info:3};return items.sort((a,b)=>ord[a.p]-ord[b.p]);
+}
+
+/* ---------- 9. UI ---------- */
+const CH={},AFTER=[],VIEWS={},ACT={},CHG={};
+let IMP=null;
+function toast(msg,ms=3200){const t=$('#toast');t.textContent=msg;t.classList.add('on');clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove('on'),ms);}
+const badge=type=>`<span class="b b-${type}">${type}</span>`;
+function kpi(label,val,type,sub,neg,cls){return`<div class="card kpi"><div class="l"><span>${label}</span>${type?badge(type):''}</div><div class="v ${neg?'neg':''} ${cls||''}">${val}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;}
+const utilCls=u=>u==null?'':u>=0.9?'neg':u>=0.75?'warn':'';
+function alertHtml(i){const icon={high:'🔴 HIGH PRIORITY',att:'🟠 ATTENTION',ok:'🟢 STABLE',info:'ℹ️'}[i.p];
+ return`<div class="al ${i.p}"><div class="small" style="font-weight:700;opacity:.8">${icon}</div><div class="t">${i.t}</div>${i.d?`<div class="small">${i.d}</div>`:''}${i.a?`<div class="a"><b>Suggested management action</b>${i.a}</div>`:''}${i.link?`<div class="small noprint" style="margin-top:4px"><a href="${i.link}">Open →</a></div>`:''}</div>`;}
+function catOptions(sel){return Object.keys(GROUP_LABEL).map(g=>`<optgroup label="${GROUP_LABEL[g]}">${CATS.filter(c=>c[1]===g).map(([c])=>`<option ${c===sel?'selected':''}>${c}</option>`).join('')}</optgroup>`).join('');}
+function chartBox(id,cfg,h=280){AFTER.push(()=>{const el=document.getElementById(id);if(!el)return;if(!window.Chart){el.parentElement.innerHTML='<p class="muted small">Charts need an internet connection the first time the page opens.</p>';return;}CH[id]=new Chart(el,cfg);});return`<div class="chart" style="height:${h}px"><canvas id="${id}"></canvas></div>`;}
+const moneyAxis={ticks:{callback:v=>short(v)}};
+const tipMoney={callbacks:{label:c=>`${c.dataset.label?c.dataset.label+': ':''}${rs(c.parsed.y??c.parsed)}`}};
+function download(name,content,type){const b=content instanceof Blob?content:new Blob([content],{type});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},500);}
+const csvCell=v=>{const s=String(v??'');return/[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+function txCsv(list){const h=['Account','Date','Description','Cheque','Reference','Debit','Credit','Balance','Category','Group','Customer/Supplier','Data type'];
+ return '﻿'+[h,...list.map(t=>[accName(t.acc),t.date,t.desc,t.chq,t.ref,t.dr||'',t.cr||'',t.rb??t.bal??'',t.cat,GROUP_LABEL[GROUP[t.cat]]||'',t.party,'ACTUAL'])].map(r=>r.map(csvCell).join(',')).join('\r\n');}
+
+const PAGES=[['dash','Dashboard'],['upload','Upload statement'],['review','Needs review'],['txns','Transactions'],['reports','Monthly report'],['plans','Commitments'],['forecast','Forecast & OD'],['actions','Action center'],['cheques','Cheques'],['history','Upload history'],['settings','Settings']];
+function renderNav(){const nr=S.txns.filter(t=>t.cat==='Needs Review').length;
+ $('#nav').innerHTML=PAGES.map(([k,l])=>`<a href="#${k}" class="${S.ui.page===k?'on':''}">${l}${k==='review'&&nr?`<span class="cnt">${nr}</span>`:''}</a>`).join('');}
+function renderAccSel(){$('#accSel').innerHTML=`<option value="ALL">All accounts</option>`+S.accounts.map(a=>`<option value="${a.id}" ${S.ui.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('');
+ $('#orgName').textContent=S.settings.org?S.settings.org+' — Bank & OD Control':'Bank & OD Control';}
+function render(){renderNav();renderAccSel();Object.keys(CH).forEach(k=>{CH[k].destroy();delete CH[k];});
+ const y=window.scrollY;$('#main').innerHTML=(VIEWS[S.ui.page]||VIEWS.dash)();AFTER.splice(0).forEach(f=>f());if(render.keep)window.scrollTo(0,y);render.keep=false;}
+const rerender=()=>{render.keep=true;render();};
+function route(){const h=(location.hash.slice(1)||'dash').split('?')[0];S.ui.page=PAGES.some(p=>p[0]===h)?h:'dash';render();window.scrollTo(0,0);}
+
+/* ---- Dashboard ---- */
+function welcome(){return`<h1>Welcome</h1><div class="card"><h2>Turn the monthly bank statement into management information</h2>
+<p>Upload the statement (PDF, CSV or Excel). The system reads it, checks it reconciles, removes duplicates, classifies transactions and builds the OD position, reports and forecast.</p>
+<div class="row"><a class="btn p" href="#upload">Upload first statement</a><button data-act="demo">Load demo data</button></div>
+<p class="muted small">Your data stays in this browser on this computer${MEMORY_ONLY?' — <b class="neg">this browser is blocking storage, so data will be lost when the page closes</b>':''}. Use Settings → Download backup regularly.</p></div>`;}
+function trendRows(ids,months){return months.map(m=>{const st=periodStats(ids,m+'-01',monthEnd(m));return{m,inc:st.income,out:st.out,net:st.net,cr:st.cr,dr:st.dr,opening:st.opening,closing:st.closing,util:st.util,peak:st.peakUtil};});}
+function trendChart(id,rows,h=280){return chartBox(id,{type:'bar',data:{labels:rows.map(r=>monthLabel(r.m)),datasets:[
+  {label:'Income',data:rows.map(r=>r.inc),backgroundColor:COLORS.ok,order:2},
+  {label:'Payments + expenses',data:rows.map(r=>r.out),backgroundColor:COLORS.bad,order:2},
+  {label:'Net cash flow',data:rows.map(r=>r.net),backgroundColor:COLORS.grey,order:2},
+  {label:'Closing balance',data:rows.map(r=>r.closing),type:'line',borderColor:COLORS.pri,backgroundColor:COLORS.pri,tension:.25,order:1}]},
+ options:{maintainAspectRatio:false,scales:{y:moneyAxis},plugins:{tooltip:tipMoney}}},h);}
+function forecastChart(id,ids,f,h=300){
+ const past=daily(ids,addDays(f.asOf,-29),f.asOf).filter(x=>x.known);
+ const labels=[...past.map(x=>dm(x.date)),...f.days.map(x=>dm(x.date))];
+ const act=[...past.map(x=>x.bal),...f.days.map(()=>null)];
+ const fc=[...past.map((x,i)=>i===past.length-1?x.bal:null),...f.days.map(x=>x.bal)];
+ const ds=[{label:'ACTUAL balance',data:act,borderColor:COLORS.ok,backgroundColor:COLORS.ok,pointRadius:0,tension:.2},
+  {label:'FORECAST balance',data:fc,borderColor:COLORS.pri,backgroundColor:COLORS.pri,borderDash:[6,4],pointRadius:0,tension:.2}];
+ if(f.limit)ds.push({label:'OD limit',data:labels.map(()=>-f.limit),borderColor:COLORS.bad,borderWidth:1.5,pointRadius:0,borderDash:[2,3]});
+ return chartBox(id,{type:'line',data:{labels,datasets:ds},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{y:moneyAxis,x:{ticks:{maxTicksLimit:12}}},plugins:{tooltip:tipMoney}}},h);}
+VIEWS.dash=()=>{
+ if(!S.txns.length)return welcome();
+ const ids=accIds(),asOf=latestC(ids);if(!asOf)return`<div class="card">No data for this account yet. <a href="#upload">Upload a statement</a>.</div>`;
+ const mk=monthKey(asOf),st=periodStats(ids,mk+'-01',asOf),lim=limitC(ids),bal=balC(ids,asOf),od=odUsedC(ids,asOf);
+ const f=forecast(ids,{horizon:S.settings.horizon,baseline:S.settings.baseline});const util=lim?od/lim:null;
+ const acts=actionItems(ids).slice(0,4);const rows=trendRows(ids,monthsWithData(ids).slice(-6));
+ return`<h1>Management dashboard <span class="muted small">bank data up to ${dmy(asOf)}</span></h1>
+ <div class="grid">
+ ${kpi('Current bank position',rs(bal),'ACTUAL','as of '+dmy(asOf),bal<0)}
+ ${kpi('OD limit',rs(lim),'',lim?'approved facility':'<a href="#settings">set in Settings</a>')}
+ ${kpi('OD used',rs(od),'ACTUAL',util!=null?pct(util)+' utilised':'',false,utilCls(util))}
+ ${kpi('Available OD',rs(lim-od),'ACTUAL',lim?'':'no limit set',lim-od<0)}
+ ${kpi('Credits · '+monthLabel(mk),rs(st.cr),'ACTUAL',asOf<monthEnd(mk)?'month to date':'')}
+ ${kpi('Debits · '+monthLabel(mk),rs(st.dr),'ACTUAL','')}
+ ${kpi('Net cash flow',rs(st.net),'ACTUAL','credits − debits',st.net<0)}
+ ${kpi('Projected lowest balance',rs(f.min.bal),'FORECAST','on '+dmy(f.min.date),f.min.bal<0)}
+ ${kpi('OD breach date',f.breach?dmy(f.breach.date):'None','FORECAST',f.breach?'over limit by '+rs(f.breach.excess):`next ${f.horizon} days`,!!f.breach)}
+ </div>
+ <div class="card"><div class="row sb"><h2>What should management do?</h2><a href="#actions">Action center →</a></div>${acts.map(alertHtml).join('')}</div>
+ <div class="g2"><div class="card"><h2>Last ${rows.length} months ${badge('ACTUAL')}</h2>${trendChart('dTrend',rows)}</div>
+ <div class="card"><h2>Balance: last 30 days and next ${f.horizon} days ${badge('ACTUAL')} ${badge('FORECAST')}</h2>${forecastChart('dFc',ids,f)}<p class="muted small">The forecast uses only the commitments entered under <a href="#plans">Commitments</a>${S.settings.baseline?' plus the 3-month average flow':''}.</p></div></div>`;
+};
+
+/* ---- Upload + preview ---- */
+VIEWS.upload=()=>{
+ const step=!IMP?1:IMP.rows.some(r=>r.include&&r.cat==='Needs Review')?5:6;
+ const names=['Upload','Read','Duplicates','Classify','Review','Confirm'];
+ let h=`<h1>${IMP&&IMP.replaceStmt?'Reprocess statement':'Upload monthly bank statement'}</h1><div class="steps">${names.map((n,i)=>`<span class="${i+1===step?'on':i+1<step?'done':''}">${i+1}. ${n}</span>`).join('')}</div>`;
+ if(!IMP){h+=`<label class="drop" id="drop" style="display:block;cursor:pointer"><p style="font-size:16px"><b>Choose or drop the statement file</b></p><input type="file" id="fileIn" accept=".pdf,.csv,.txt,.xls,.xlsx" data-chg="file" style="margin:8px auto"><p class="muted small">PDF (text-based), CSV or Excel. Best accuracy: CSV/Excel downloaded from online banking.<br>The file is read on this computer — nothing is sent to any server.</p></label>`;
+  AFTER.push(bindDrop);return h;}
+ return h+previewHtml();
+};
+function bindDrop(){const d=$('#drop');if(!d)return;['dragenter','dragover'].forEach(e=>d.addEventListener(e,ev=>{ev.preventDefault();d.classList.add('on');}));
+ ['dragleave','drop'].forEach(e=>d.addEventListener(e,ev=>{ev.preventDefault();d.classList.remove('on');}));d.addEventListener('drop',ev=>{const f=ev.dataTransfer.files[0];if(f)handleFile(f);});}
+CHG.file=el=>{const f=el.files[0];if(f)handleFile(f);};
+async function handleFile(file,replaceStmt){
+ toast('Reading '+file.name+' …');
+ try{const buf=await file.arrayBuffer();const isPdf=/\.pdf$/i.test(file.name);
+  const src=isPdf?await readPdf(buf):readSheet(file.name,buf);
+  src.fileName=file.name;src.type=file.type||'';src.buf=buf;
+  if(!src.rows.length)throw new Error('The file is empty.');
+  const det=detectHeader(src.rows);let hIdx,map;
+  if(det){hIdx=det.idx;map=det.map;const saved=S.settings.mappings[headerSig(src.rows[hIdx])];if(saved)map={...saved};}
+  else{hIdx=-1;map=guessColumns(src.rows);}
+  if(replaceStmt&&replaceStmt.map&&replaceStmt.hIdx!=null&&replaceStmt.hIdx<src.rows.length){hIdx=replaceStmt.hIdx;map={...replaceStmt.map};}
+  map=validateMap(src.rows,hIdx,map);
+  IMP={src,hIdx,map,order:S.settings.dateOrder,showMap:!det||(isPdf&&!src.pdfAligned),saveMap:true,override:false,acc:replaceStmt?replaceStmt.acc:null,newAcc:null,replaceStmt:replaceStmt?replaceStmt.id:null,manualOpening:null};
+  recompute(true);
+  if(location.hash!=='#upload')location.hash='#upload';else render();
+  if(!IMP.fin.out.length)toast('No transactions were found automatically. Use “Map columns” to show which column is which.',7000);
+ }catch(e){console.error(e);toast(e.message||String(e),7000);}
+}
+function recompute(first){
+ const I=IMP;const ex=extract(I.src.rows,I.hIdx,I.map,I.order);
+ I.fin=finalize(ex,I.src.preText+'\n'+I.src.fileName);
+ if(I.manualOpening!=null&&I.fin.opening==null){I.fin.opening=I.manualOpening;if(!I.fin.hasBal)I.fin.closing=round2(I.manualOpening+I.fin.cr-I.fin.dr);}
+ if(first&&I.acc==null){const text=I.src.preText+' '+I.src.fileName;const num=detectAccNo(text);I.detNo=num;
+  const same=(a,b)=>a&&b&&(a===b||(a.length>=8&&b.length>=8&&(a.endsWith(b)||b.endsWith(a))));
+  const m=num?S.accounts.find(a=>same(digits(a.number),num)):null;
+  if(m)I.acc=m.id;else if(!num&&S.accounts.length)I.acc=S.accounts[0].id;else I.acc='NEW';
+  I.newAcc={name:'',bank:guessBank(text),number:num||'',odLimit:''};}
+ if(!I.newAcc)I.newAcc={name:'',bank:'',number:'',odLimit:''};
+ buildRows();
+}
+function buildRows(){
+ const I=IMP;const acc=I.acc;const old=Object.fromEntries((I.rows||[]).map(r=>[r.key+'#'+r.row,r]));
+ const existing=new Set(S.txns.filter(t=>t.acc===acc&&t.stmt!==I.replaceStmt).map(t=>t.key));
+ const prevManual=I.replaceStmt?Object.fromEntries(S.txns.filter(t=>t.stmt===I.replaceStmt&&t.src==='manual').map(t=>[t.key,t])):{};
+ const seen={};
+ I.rows=I.fin.out.map(t=>{const key=txKey(acc,t);const p=old[key+'#'+t.row];const c=classify(t);const pm=prevManual[key];
+  seen[key]=(seen[key]||0)+1;const dup=existing.has(key);
+  return{...t,key,dup,include:p?p.include:!dup,cat:p&&p.manual?p.cat:pm?pm.cat:c.cat,party:p&&p.manual?p.party:pm?pm.party:c.party,src:c.src,manual:p?p.manual:!!pm,review:p?p.review:c.cat==='Needs Review',kw:p?p.kw:suggestKw(t.desc),remember:p?p.remember:true};});
+ I.rows.forEach(r=>r.dupInFile=seen[r.key]>1);
+ const f=I.fin;I.overlap=f.from?S.statements.filter(s=>s.acc===acc&&s.id!==I.replaceStmt&&s.from<=f.to&&s.to>=f.from):[];
+}
+function previewHtml(){
+ const I=IMP,f=I.fin,rows=I.rows;const inc=rows.filter(r=>r.include),dups=rows.filter(r=>r.dup).length;
+ const rev=rows.map((r,i)=>[r,i]).filter(([r])=>r.include&&r.review);const open=rev.filter(([r])=>r.cat==='Needs Review').length;
+ const recOk=f.recon==null?null:Math.abs(f.recon)<0.51;
+ const accOk=I.acc&&(I.acc!=='NEW'||String(I.newAcc.name).trim());
+ const can=inc.length>0&&(recOk!==false||I.override)&&accOk;
+ const acctSel=`<select data-chg="impAcc">${S.accounts.map(a=>`<option value="${a.id}" ${I.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}<option value="NEW" ${I.acc==='NEW'?'selected':''}>+ New account…</option></select>`;
+ let h=`<div class="card"><div class="row sb"><h2>Import preview ${badge('ACTUAL')}</h2><span class="muted small">Nothing is saved until you press Confirm import.</span></div>
+ <div class="grid">
+ ${kpi('File',esc(I.src.fileName),'',I.src.kind.toUpperCase()+(I.detNo?' · A/C '+esc(I.detNo):''))}
+ <div class="card kpi"><div class="l">Account</div><div style="margin-top:6px">${acctSel}</div></div>
+ ${kpi('Period',f.from?`${dmy(f.from)} – ${dmy(f.to)}`:'–','',f.from?monthLabel(monthKey(f.to)):'')}
+ ${kpi('Transactions',String(rows.length),'',`${inc.length} to import · ${dups} duplicate${dups===1?'':'s'}`)}
+ ${kpi('Total credits',rs(f.cr),'','')}${kpi('Total debits',rs(f.dr),'','')}
+ ${kpi('Opening balance',rs(f.opening),'',f.opening==null?'not found':'',f.opening<0)}${kpi('Closing balance',rs(f.closing),'','',f.closing<0)}
+ </div>`;
+ if(I.acc==='NEW')h+=`<div class="card"><h2>New account</h2><div class="form">
+  <label>Account name *<input data-chg="newAcc" data-f="name" value="${esc(I.newAcc.name)}" placeholder="e.g. Commercial Bank – Current A/C"></label>
+  <label>Bank<input data-chg="newAcc" data-f="bank" value="${esc(I.newAcc.bank)}"></label>
+  <label>Account number<input data-chg="newAcc" data-f="number" value="${esc(I.newAcc.number)}"></label>
+  <label>Approved OD limit (Rs.)<input data-chg="newAcc" data-f="odLimit" type="number" min="0" value="${esc(I.newAcc.odLimit)}" placeholder="0 if none"></label></div></div>`;
+ if(recOk===true)h+=`<div class="al ok"><div class="t">✓ Statement reconciles</div><div class="small">Opening ${rs(f.opening)} + credits ${rs(f.cr)} − debits ${rs(f.dr)} = closing ${rs(f.closing)}.</div></div>`;
+ else if(recOk===false)h+=`<div class="al high"><div class="t">⚠️ STATEMENT RECONCILIATION ERROR</div><div>Imported transactions do not reconcile with the statement closing balance. Difference: <b>${rs(f.recon)}</b>.</div>
+  ${f.breaks.length?`<div class="small" style="margin-top:6px">Running balance first breaks at: ${f.breaks.slice(0,5).map(b=>`line ${b.row} (${dmy(b.date)} ${esc(b.desc.slice(0,30))}: expected ${rs(b.expected)}, statement shows ${rs(b.shown)})`).join('; ')}${f.breaks.length>5?` … and ${f.breaks.length-5} more`:''}.</div>`:''}
+  <div class="small" style="margin-top:6px">Usual causes: a column mapped wrongly (debit/credit swapped), rows missed from a PDF, or a statement page missing. Use <b>Map columns</b> to check.</div>
+  <label class="small" style="display:flex;gap:6px;margin-top:8px"><input type="checkbox" data-chg="override" ${I.override?'checked':''}> I have checked this. Import anyway and mark the statement <b>UNRECONCILED</b>.</label></div>`;
+ else h+=`<div class="al att"><div class="t">No balance figures found — reconciliation is not possible</div><div class="small">Enter the opening balance printed on the statement so the running balance and OD figures are right (use minus for overdrawn):</div><div class="row" style="margin-top:6px"><input type="number" step="0.01" data-chg="manOpen" value="${I.manualOpening??''}" placeholder="e.g. -2500000"></div></div>`;
+ if(I.overlap.length)h+=`<div class="al att"><div class="t">This period has already been imported</div><div class="small">${I.overlap.map(s=>`${monthLabel(monthKey(s.to))} statement (${esc(s.file)}, ${dmy(s.from)}–${dmy(s.to)})`).join('; ')} is already in the system for this account. ${dups} duplicate transaction${dups===1?' is':'s are'} excluded; ${inc.length} new one${inc.length===1?'':'s'} will be imported.</div></div>`;
+ const same=rows.filter(r=>r.dupInFile).length;
+ if(same)h+=`<div class="al att"><div class="small"><b>${same} rows are identical within this file</b> (same date, amount, description and balance). They are kept — check them in the list below.</div></div>`;
+ if(f.issues.length)h+=`<div class="al high"><div class="t">${f.issues.length} line${f.issues.length>1?'s':''} could not be read</div><div class="small">${f.issues.slice(0,8).map(i=>`Line ${i.row}: ${i.msg} — <span class="muted">${esc(String(i.text).slice(0,90))}</span>`).join('<br>')}${f.issues.length>8?'<br>…':''}</div></div>`;
+ if(f.notes.length)h+=f.notes.map(n=>`<div class="al info small">${esc(n)}</div>`).join('');
+ h+=`<div class="row" style="margin-top:10px"><button class="p" data-act="confirmImport" ${can?'':'disabled'}>Confirm import (${inc.length})</button><button data-act="cancelImport">Cancel</button><button data-act="toggleMap">${I.showMap?'Hide column mapping':'Map columns'}</button>
+ ${!accOk?'<span class="small neg">Enter a name for the new account.</span>':''}${recOk===false&&!I.override?'<span class="small neg">Resolve or acknowledge the reconciliation error first.</span>':''}${open?`<span class="small warn">${open} still need a category (you can also do this after importing).</span>`:''}</div></div>`;
+ if(I.showMap)h+=mapHtml();
+ if(rev.length)h+=`<div class="card"><h2>Step 5 · Needs review (${open} of ${rev.length} open)</h2><p class="muted small">Pick a category. Tick “remember” and the keyword becomes a rule, so next month these are classified automatically.</p>
+ <div class="tw"><table><thead><tr><th>Date</th><th>Description</th><th class="n">In</th><th class="n">Out</th><th>Category</th><th>Customer / supplier</th><th>Remember keyword</th></tr></thead><tbody>
+ ${rev.map(([r,i])=>`<tr><td>${dmy(r.date)}</td><td>${esc(r.desc)}</td><td class="n">${r.cr?fmt(r.cr):''}</td><td class="n">${r.dr?fmt(r.dr):''}</td>
+ <td><select data-chg="impCat" data-i="${i}">${catOptions(r.cat)}</select></td><td><input data-chg="impParty" data-i="${i}" value="${esc(r.party)}" size="14"></td>
+ <td><div class="row" style="flex-wrap:nowrap"><input type="checkbox" data-chg="impRem" data-i="${i}" ${r.remember?'checked':''}><input data-chg="impKw" data-i="${i}" value="${esc(r.kw)}" size="14"></div></td></tr>`).join('')}</tbody></table></div></div>`;
+ h+=`<div class="card"><details ${rows.length<=60?'open':''}><summary>All transactions in the file (${rows.length})</summary>
+ <div class="tw" style="margin-top:8px"><table><thead><tr><th>Import</th><th>Date</th><th>Description</th><th>Chq</th><th class="n">Debit</th><th class="n">Credit</th><th class="n">Balance</th><th>Category</th><th>Flag</th></tr></thead><tbody>
+ ${rows.map((r,i)=>`<tr class="${r.include?'':'dim'}"><td><input type="checkbox" data-chg="impInc" data-i="${i}" ${r.include?'checked':''}></td><td>${dmy(r.date)}</td><td>${esc(r.desc)}</td><td>${esc(r.chq)}</td><td class="n">${r.dr?fmt(r.dr,2):''}</td><td class="n">${r.cr?fmt(r.cr,2):''}</td><td class="n">${r.bal!=null?fmt(r.bal,2):''}</td>
+ <td><select data-chg="impCat" data-i="${i}">${catOptions(r.cat)}</select></td><td>${r.dup?'<span class="b b-red">ALREADY IMPORTED</span>':''}${r.dupInFile?'<span class="b b-grey">SAME IN FILE</span>':''}</td></tr>`).join('')}
+ <tr class="tot"><td colspan="4">Total (all rows)</td><td class="n">${fmt(f.dr,2)}</td><td class="n">${fmt(f.cr,2)}</td><td colspan="3"></td></tr></tbody></table></div></details></div>`;
+ return h;
+}
+function mapHtml(){
+ const I=IMP,raw=I.src.rows,start=I.hIdx+1;const sample=raw.slice(Math.max(0,start),start+12);
+ const n=Math.max(0,...sample.map(r=>r.length),...(I.hIdx>=0?[raw[I.hIdx].length]:[0]));
+ const fieldOf=j=>(Object.entries(I.map).find(([f,v])=>v===j)||[''])[0];
+ return`<div class="card"><h2>Map columns</h2><p class="muted small">Tell the system which column is which. It re-reads the file instantly and re-checks the reconciliation.</p>
+ <div class="form"><label>Header row (line number, 0 = none)<input type="number" min="0" max="${raw.length}" data-chg="hIdx" value="${I.hIdx+1}"></label>
+ <label>Date format<select data-chg="order">${[['AUTO','Automatic'],['DMY','Day/Month/Year'],['MDY','Month/Day/Year']].map(([v,l])=>`<option value="${v}" ${I.order===v?'selected':''}>${l}</option>`).join('')}</select></label>
+ <label class="ck"><input type="checkbox" data-chg="saveMap" ${I.saveMap?'checked':''}> Remember this layout for this bank's files</label></div>
+ <div class="tw" style="margin-top:10px"><table><thead><tr>${Array.from({length:n},(_,j)=>`<th><select class="map-sel" data-chg="mapCol" data-j="${j}">${FIELDS.map(([v,l])=>`<option value="${v}" ${fieldOf(j)===v?'selected':''}>${l}</option>`).join('')}</select><div class="muted" style="text-transform:none">${I.hIdx>=0?esc(raw[I.hIdx][j]??''):'col '+(j+1)}</div></th>`).join('')}</tr></thead>
+ <tbody>${sample.map(r=>`<tr>${Array.from({length:n},(_,j)=>`<td>${esc(r[j]??'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
+}
+CHG.impAcc=el=>{IMP.acc=el.value;buildRows();rerender();};
+CHG.newAcc=el=>{IMP.newAcc[el.dataset.f]=el.value;if(el.dataset.f==='name')rerender();};
+CHG.override=el=>{IMP.override=el.checked;rerender();};
+CHG.manOpen=el=>{IMP.manualOpening=el.value===''?null:+el.value;recompute();rerender();};
+CHG.impCat=el=>{const r=IMP.rows[+el.dataset.i];r.cat=el.value;r.manual=true;rerender();};
+CHG.impParty=el=>{const r=IMP.rows[+el.dataset.i];r.party=el.value;r.manual=true;};
+CHG.impKw=el=>{IMP.rows[+el.dataset.i].kw=el.value;};
+CHG.impRem=el=>{IMP.rows[+el.dataset.i].remember=el.checked;};
+CHG.impInc=el=>{IMP.rows[+el.dataset.i].include=el.checked;rerender();};
+CHG.hIdx=el=>{IMP.hIdx=Math.max(-1,(+el.value||0)-1);const d=IMP.hIdx>=0?detectHeader([IMP.src.rows[IMP.hIdx]]):null;if(d)IMP.map=d.map;recompute();rerender();};
+CHG.order=el=>{IMP.order=el.value;recompute();rerender();};
+CHG.saveMap=el=>{IMP.saveMap=el.checked;};
+CHG.mapCol=el=>{const j=+el.dataset.j,f=el.value;for(const k of Object.keys(IMP.map))if(IMP.map[k]===j||k===f)delete IMP.map[k];if(f)IMP.map[f]=j;recompute();rerender();};
+ACT.toggleMap=()=>{IMP.showMap=!IMP.showMap;rerender();};
+ACT.cancelImport=()=>{IMP=null;render();};
+ACT.confirmImport=async()=>{
+ const I=IMP,f=I.fin;let accId=I.acc;
+ if(accId==='NEW'){const a={id:uid(),name:I.newAcc.name.trim(),bank:I.newAcc.bank,number:I.newAcc.number,odLimit:+I.newAcc.odLimit||0};await DB.put('accounts',a);S.accounts.push(a);accId=a.id;}
+ const old=I.replaceStmt?S.statements.find(s=>s.id===I.replaceStmt):null;
+ if(old){const ids=S.txns.filter(t=>t.stmt===old.id).map(t=>t.id);await DB.delMany('txns',ids);S.txns=S.txns.filter(t=>t.stmt!==old.id);await DB.del('statements',old.id);S.statements=S.statements.filter(s=>s.id!==old.id);}
+ const fileId=old&&old.fileId?old.fileId:uid();if(!(old&&old.fileId))await DB.put('files',{id:fileId,name:I.src.fileName,type:I.src.type,data:I.src.buf});
+ const inc=I.rows.filter(r=>r.include);const stId=uid();
+ const st={id:stId,acc:accId,file:I.src.fileName,fileId,kind:I.src.kind,from:f.from,to:f.to,opening:f.opening,closing:f.closing,cr:f.cr,dr:f.dr,count:I.rows.length,imported:inc.length,dups:I.rows.length-inc.length,
+  uploaded:old?old.uploaded:new Date().toISOString(),reprocessed:old?new Date().toISOString():null,recon:f.recon,
+  status:f.recon==null?'Imported – no balances to reconcile':Math.abs(f.recon)<0.51?'Imported':'Imported – UNRECONCILED',map:I.map,hIdx:I.hIdx,order:f.order};
+ const tx=inc.map(r=>({id:uid(),acc:accId,stmt:stId,date:r.date,desc:r.desc,dr:r.dr,cr:r.cr,bal:r.bal,chq:r.chq,ref:r.ref,seq:r.row,cat:r.cat,party:r.party,src:r.manual?'manual':r.src,key:txKey(accId,r)}));
+ const newRules=[];
+ inc.filter(r=>r.manual&&r.remember&&String(r.kw).trim()&&r.cat!=='Needs Review').forEach(r=>{const w=normWords(r.kw);if(!newRules.some(x=>x.words===w&&x.cat===r.cat))newRules.push({id:uid(),words:w,dir:r.cr>r.dr?'in':'out',cat:r.cat,party:r.party||'',builtin:false,created:Date.now()});});
+ await DB.put('statements',st);await DB.putMany('txns',tx);if(newRules.length)await DB.putMany('rules',newRules);
+ S.statements.push(st);S.txns.push(...tx);S.rules.push(...newRules);
+ let more=0;if(newRules.length)more=await reapplyRules(false);
+ const closed=await matchChequePlans(tx);
+ if(I.saveMap&&I.hIdx>=0){S.settings.mappings[headerSig(I.src.rows[I.hIdx])]=I.map;await saveSettings();}
+ derive();IMP=null;S.ui.rp={type:'month',key:monthKey(f.to)};
+ toast(`${old?'Reprocessed':'Imported'} ${tx.length} transactions${more?`; ${more} older ones classified by your new rules`:''}${closed?`; ${closed} expected cheque${closed>1?'s':''} marked cleared`:''}.`,5000);
+ location.hash='#reports';
+};
+async function reapplyRules(all,stmtId){
+ const ch=[];for(const t of S.txns){if(t.src==='manual')continue;if(stmtId&&t.stmt!==stmtId)continue;if(!all&&!stmtId&&t.cat!=='Needs Review')continue;
+  const c=classify(t);if(c.cat!==t.cat||c.party!==t.party){t.cat=c.cat;t.party=c.party;t.src=c.src;ch.push(t);}}
+ if(ch.length)await DB.putMany('txns',ch.map(({rb,...t})=>t));return ch.length;
+}
+async function matchChequePlans(tx){
+ const ch=[];for(const p of S.plans){if(p.status!=='open'||!p.chq||!['CHQ_IN','CHQ_OUT'].includes(p.kind))continue;
+  const t=tx.find(t=>t.chq&&t.chq.replace(/^0+/,'')===String(p.chq).replace(/^0+/,'')&&(p.kind==='CHQ_IN'?t.cr>0:t.dr>0)&&!RET_RX.test(t.desc));
+  if(t){p.status='done';p.doneDate=t.date;p.doneNote='Cleared per bank statement';ch.push(p);}}
+ if(ch.length)await DB.putMany('plans',ch);return ch.length;
+}
+
+/* ---- Needs review ---- */
+VIEWS.review=()=>{
+ const ids=accIds();const list=S.txns.filter(t=>t.cat==='Needs Review'&&ids.includes(t.acc)).sort((a,b)=>txSort(b,a));
+ if(!list.length)return`<h1>Needs review</h1><div class="al ok"><div class="t">All transactions are classified.</div></div>`;
+ return`<h1>Needs review <span class="muted small">${list.length} transactions · ${rs(sum(list,t=>t.cr+t.dr))}</span></h1>
+ <div class="card"><p class="muted small" style="margin-top:0">Choose the category (and customer/supplier if useful). With “remember” ticked, the keyword becomes a rule and every other matching transaction is classified at once — now and in future months.</p>
+ <div class="tw"><table><thead><tr><th>Date</th><th>Account</th><th>Description</th><th class="n">In</th><th class="n">Out</th><th>Category</th><th>Customer / supplier</th><th>Remember keyword</th><th></th></tr></thead><tbody>
+ ${list.map(t=>`<tr><td>${dmy(t.date)}</td><td class="small">${esc(accName(t.acc))}</td><td>${esc(t.desc)}</td><td class="n">${t.cr?fmt(t.cr):''}</td><td class="n">${t.dr?fmt(t.dr):''}</td>
+ <td><select id="rc-${t.id}">${catOptions('Needs Review')}</select></td><td><input id="rp-${t.id}" size="14"></td>
+ <td><div class="row" style="flex-wrap:nowrap"><input type="checkbox" id="rr-${t.id}" checked><input id="rk-${t.id}" value="${esc(suggestKw(t.desc))}" size="14"></div></td>
+ <td><button class="sm p" data-act="saveReview" data-id="${t.id}">Save</button></td></tr>`).join('')}</tbody></table></div></div>`;
+};
+ACT.saveReview=async b=>{
+ const id=b.dataset.id,t=S.txns.find(x=>x.id===id);const cat=$('#rc-'+id).value,party=$('#rp-'+id).value.trim(),rem=$('#rr-'+id).checked,kw=normWords($('#rk-'+id).value);
+ if(cat==='Needs Review')return toast('Choose a category first.');
+ t.cat=cat;t.party=party;t.src='manual';const{rb,...clean}=t;await DB.put('txns',clean);
+ let more=0;if(rem&&kw){const r={id:uid(),words:kw,dir:t.cr>t.dr?'in':'out',cat,party,builtin:false,created:Date.now()};await DB.put('rules',r);S.rules.push(r);more=await reapplyRules(false);}
+ derive();toast(more?`Saved. Rule “${kw}” also classified ${more} similar transaction${more>1?'s':''}.`:'Saved.');rerender();
+};
+
+/* ---- Transactions ---- */
+function filteredTx(){const tf=S.ui.tf,ids=accIds(),q=tf.q.toUpperCase();
+ return S.txns.filter(t=>ids.includes(t.acc)&&(!tf.m||monthKey(t.date)===tf.m)&&(!tf.stmt||t.stmt===tf.stmt)&&(!tf.cat||t.cat===tf.cat||GROUP[t.cat]===tf.cat)&&(!q||(t.desc+' '+t.party+' '+t.chq+' '+t.ref).toUpperCase().includes(q))).sort((a,b)=>txSort(b,a));}
+VIEWS.txns=()=>{
+ const tf=S.ui.tf,list=filteredTx(),ms=monthsWithData(accIds()).reverse();const show=list.slice(0,1500);const st=tf.stmt?S.statements.find(s=>s.id===tf.stmt):null;
+ return`<h1>Transactions ${badge('ACTUAL')}</h1><div class="card noprint"><div class="form">
+ <label>Search<input data-chg="tfQ" value="${esc(tf.q)}" placeholder="description, customer, cheque…"></label>
+ <label>Month<select data-chg="tfM"><option value="">All months</option>${ms.map(m=>`<option value="${m}" ${tf.m===m?'selected':''}>${monthLabel(m)}</option>`).join('')}</select></label>
+ <label>Category / group<select data-chg="tfCat"><option value="">All</option>${Object.entries(GROUP_LABEL).map(([g,l])=>`<option value="${g}" ${tf.cat===g?'selected':''}>▸ ${l}</option>`).join('')}${CATS.map(([c])=>`<option ${tf.cat===c?'selected':''}>${c}</option>`).join('')}</select></label>
+ <div class="row">${st?`<span class="b b-grey" style="padding:5px 8px">Statement: ${esc(st.file)} <a href="#" data-act="clrStmt">✕</a></span>`:''}<button data-act="exportTx">Export CSV</button></div></div></div>
+ <div class="card"><div class="muted small" style="margin-bottom:6px">${list.length} transactions · credits ${rs(sum(list,t=>t.cr))} · debits ${rs(sum(list,t=>t.dr))}${list.length>show.length?` · showing latest ${show.length}`:''}</div>
+ <div class="tw"><table><thead><tr><th>Date</th><th>Description</th><th>Chq</th><th class="n">Debit</th><th class="n">Credit</th><th class="n">Balance</th><th>Category</th><th>Customer / supplier</th></tr></thead><tbody>
+ ${show.map(t=>`<tr><td>${dmy(t.date)}</td><td>${esc(t.desc)}${S.accounts.length>1?`<div class="muted small">${esc(accName(t.acc))}</div>`:''}</td><td>${esc(t.chq)}</td><td class="n">${t.dr?fmt(t.dr,2):''}</td><td class="n">${t.cr?fmt(t.cr,2):''}</td><td class="n ${t.rb<0?'neg':''}">${fmt(t.rb,2)}</td>
+ <td><select data-chg="txCat" data-id="${t.id}">${catOptions(t.cat)}</select></td><td><input data-chg="txParty" data-id="${t.id}" value="${esc(t.party)}" size="14"></td></tr>`).join('')}</tbody></table></div></div>`;
+};
+CHG.tfQ=el=>{S.ui.tf.q=el.value;rerender();};CHG.tfM=el=>{S.ui.tf.m=el.value;rerender();};CHG.tfCat=el=>{S.ui.tf.cat=el.value;rerender();};
+ACT.clrStmt=()=>{S.ui.tf.stmt='';rerender();};
+ACT.exportTx=()=>download('transactions.csv',txCsv(filteredTx().reverse()),'text/csv');
+async function saveTx(t){const{rb,...c}=t;await DB.put('txns',c);}
+CHG.txCat=async el=>{const t=S.txns.find(x=>x.id===el.dataset.id);t.cat=el.value;t.src='manual';await saveTx(t);toast('Category updated.');renderNav();};
+CHG.txParty=async el=>{const t=S.txns.find(x=>x.id===el.dataset.id);t.party=el.value.trim();t.src='manual';await saveTx(t);toast('Saved.');};
+
+/* ---- Monthly report ---- */
+const fyYear=d=>{const s=S.settings.fyStart,y=+d.slice(0,4),m=+d.slice(5,7);return m>=s?y:y-1;};
+const fyFrom=y=>`${y}-${pad(S.settings.fyStart)}-01`;
+const fyLabel=y=>S.settings.fyStart===1?`FY ${y}`:`FY ${y}/${String(y+1).slice(2)}`;
+const rangeM=(from,n)=>({from,to:addDays(addMonths(from,n),-1)});
+function resolvePeriod(ids){
+ const p=S.ui.rp,months=monthsWithData(ids),last=latestC(ids)||todayIso(),lm=monthKey(last);let cur,prev,label,pl;
+ switch(p.type){
+  case'quarter':{const y=p.y??fyYear(last);const q=p.q??(Math.floor(((+last.slice(5,7)-S.settings.fyStart+12)%12)/3)+1);cur=rangeM(addMonths(fyFrom(y),3*(q-1)),3);prev=rangeM(addMonths(cur.from,-3),3);label=`Q${q} ${fyLabel(y)}`;pl='the previous quarter';break;}
+  case'fy':{const y=p.y??fyYear(last);cur=rangeM(fyFrom(y),12);prev=rangeM(fyFrom(y-1),12);label=fyLabel(y);pl=fyLabel(y-1);break;}
+  case'ytd':{const y=fyYear(last);cur={from:fyFrom(y),to:last};prev={from:fyFrom(y-1),to:(+last.slice(0,4)-1)+last.slice(4)};label=`YTD ${fyLabel(y)} (to ${dmy(last)})`;pl='the same period last year';break;}
+  case'last3':case'last6':case'last12':{const n=+p.type.slice(4);const f=addMonths(lm+'-01',-(n-1));cur={from:f,to:monthEnd(lm)};prev=rangeM(addMonths(f,-n),n);label=`Last ${n} months`;pl=`the previous ${n} months`;break;}
+  case'custom':{const from=p.from||lm+'-01',to=p.to||last;const len=daysBetween(from,to)+1;cur={from,to};prev={from:addDays(from,-len),to:addDays(from,-1)};label=`${dmy(from)} – ${dmy(to)}`;pl=`the previous ${len} days`;break;}
+  default:{const k=p.key&&months.includes(p.key)?p.key:lm;cur={from:k+'-01',to:monthEnd(k)};const pk=monthKey(addMonths(k+'-01',-1));prev={from:pk+'-01',to:monthEnd(pk)};label=monthLabel(k);pl=monthLabel(pk);}
+ }
+ return{cur,prev,label,pl};
+}
+function cmpRow(name,a,b,upIsBad,isPct){const c=isPct?(a!=null&&b!=null?a-b:null):chg(a,b);const th=S.settings.highlight/100;const sig=c!=null&&(isPct?Math.abs(c)>=0.05:Math.abs(c)>=th);
+ const cls=sig?((upIsBad?c>0:c<0)?'up':'dn'):'';const f=v=>isPct?pct(v):rs(v);
+ return`<tr><td>${name}</td><td class="n">${f(b)}</td><td class="n">${f(a)}</td><td class="n ${cls}">${a!=null&&b!=null?(isPct?(c>0?'+':'')+(c*100).toFixed(1)+' pts':(a-b>=0?'+':'')+fmt(a-b)):'–'}</td><td class="n ${cls}">${!isPct&&c!=null&&isFinite(c)?(c>0?'▲ ':'▼ ')+pct(Math.abs(c)):''}</td></tr>`;}
+VIEWS.reports=()=>{
+ const ids=accIds();if(!S.txns.length)return welcome();
+ const P=resolvePeriod(ids),st=periodStats(ids,P.cur.from,P.cur.to),pv=periodStats(ids,P.prev.from,P.prev.to);
+ const months=monthsWithData(ids),fys=[...new Set(months.map(m=>fyYear(m+'-01')))].sort();
+ const p=S.ui.rp;const qs=[];fys.forEach(y=>[1,2,3,4].forEach(q=>{const r=rangeM(addMonths(fyFrom(y),3*(q-1)),3);if(months.some(m=>m+'-01'>=r.from&&m+'-01'<=r.to))qs.push({y,q});}));
+ const ctl=`<div class="card noprint"><div class="form">
+ <label>Period<select data-chg="rpType">${[['month','Month'],['quarter','Quarter'],['fy','Financial year'],['ytd','Year to date'],['last3','Last 3 months'],['last6','Last 6 months'],['last12','Last 12 months'],['custom','Custom dates']].map(([v,l])=>`<option value="${v}" ${p.type===v?'selected':''}>${l}</option>`).join('')}</select></label>
+ ${p.type==='month'?`<label>Month<select data-chg="rpKey">${[...months].reverse().map(m=>`<option value="${m}" ${monthKey(P.cur.from)===m?'selected':''}>${monthLabel(m)}</option>`).join('')}</select></label>`:''}
+ ${p.type==='quarter'?`<label>Quarter<select data-chg="rpQ">${[...qs].reverse().map(o=>`<option value="${o.y}-${o.q}" ${P.label===`Q${o.q} ${fyLabel(o.y)}`?'selected':''}>Q${o.q} ${fyLabel(o.y)}</option>`).join('')}</select></label>`:''}
+ ${p.type==='fy'?`<label>Financial year<select data-chg="rpY">${[...fys].reverse().map(y=>`<option value="${y}" ${P.label===fyLabel(y)?'selected':''}>${fyLabel(y)}</option>`).join('')}</select></label>`:''}
+ ${p.type==='custom'?`<label>From<input type="date" data-chg="rpFrom" value="${P.cur.from}"></label><label>To<input type="date" data-chg="rpTo" value="${P.cur.to}"></label>`:''}
+ <div class="row"><button data-act="print">Print / save PDF</button><button data-act="exportPeriod">Export CSV</button></div></div></div>`;
+ if(!st.tx.length&&st.closing==null)return`<h1>Management report</h1>${ctl}<div class="card">No bank data in ${esc(P.label)}.</div>`;
+ const ins=insights(st,pv,P.pl);
+ const incCats=st.cats.filter(c=>c.g==='INCOME').sort((a,b)=>b.val-a.val),outCats=st.cats.filter(c=>c.g==='PAYMENT'||c.g==='EXPENSE').sort((a,b)=>b.val-a.val),othCats=st.cats.filter(c=>c.g==='OTHER');
+ const parties=Object.entries(st.byParty).sort((a,b)=>b[1]-a[1]);
+ const top=st.tx.filter(t=>GROUP[t.cat]==='INCOME'&&t.cr>0).sort((a,b)=>b.cr-a.cr).slice(0,10);
+ const expPlans=S.plans.filter(x=>x.status==='open'&&ids.includes(x.acc)&&PLAN_KINDS[x.kind].sign>0).sort((a,b)=>a.date<b.date?-1:1).slice(0,15);
+ const long=daysBetween(P.cur.from,P.cur.to)>40;const buckets={};
+ st.tx.forEach(t=>{const g=GROUP[t.cat];const dd=+t.date.slice(8);const k=long?monthLabel(monthKey(t.date)):'Days '+(dd<=7?'1–7':dd<=14?'8–14':dd<=21?'15–21':'22–end');const b=buckets[k]||(buckets[k]={i:0,o:0});if(g==='INCOME')b.i+=t.cr-t.dr;if(g==='PAYMENT'||g==='EXPENSE')b.o+=t.dr-t.cr;});
+ const bk=long?months.filter(m=>m+'-01'>=P.cur.from&&m+'-01'<=P.cur.to).map(monthLabel):['Days 1–7','Days 8–14','Days 15–21','Days 22–end'];
+ const tMonths=long?months.filter(m=>m+'-01'>=P.cur.from&&m+'-01'<=P.cur.to):months.filter(m=>m<=monthKey(P.cur.to)).slice(-S.ui.trendN);
+ const tr=trendRows(ids,tMonths);const pat=patterns(ids);
+ const outTotal=sum(outCats,c=>c.val);
+ return`<h1>Management report · ${esc(P.label)} <span class="muted small">${S.ui.acc==='ALL'?'all accounts':esc(accName(S.ui.acc))}${st.to2<P.cur.to?' · data to '+dmy(st.to2):''}</span></h1>${ctl}
+ <div class="g2"><div class="card"><h2>Bank position ${badge('ACTUAL')}</h2><table>
+ <tr><td>Opening balance</td><td class="n">${rs(st.opening)}</td></tr><tr><td>Total credits</td><td class="n pos">${rs(st.cr)}</td></tr><tr><td>Total debits</td><td class="n neg">${rs(st.dr)}</td></tr>
+ <tr class="tot"><td>Closing balance</td><td class="n">${rs(st.closing)}</td></tr><tr><td>Average balance</td><td class="n">${rs(st.avg)}</td></tr>
+ <tr><td>Lowest balance</td><td class="n">${st.min?rs(st.min.bal)+' <span class="muted small">'+dmy(st.min.date)+'</span>':'–'}</td></tr><tr><td>Highest balance</td><td class="n">${st.max?rs(st.max.bal)+' <span class="muted small">'+dmy(st.max.date)+'</span>':'–'}</td></tr></table></div>
+ <div class="card"><h2>OD position ${badge('ACTUAL')}</h2><table>
+ <tr><td>Approved OD limit</td><td class="n">${rs(st.lim)}</td></tr><tr><td>Maximum OD used</td><td class="n">${st.odMax?rs(st.odMax.od)+' <span class="muted small">'+dmy(st.odMax.date)+'</span>':'–'}</td></tr>
+ <tr><td>Average OD used</td><td class="n">${rs(st.odAvg)}</td></tr><tr><td>Closing OD</td><td class="n">${rs(st.closingOD)}</td></tr><tr><td>Available OD</td><td class="n">${st.lim?rs(st.lim-st.closingOD):'–'}</td></tr>
+ <tr class="tot"><td>OD utilisation (closing)</td><td class="n ${utilCls(st.util)}">${pct(st.util)}</td></tr><tr><td>Peak utilisation</td><td class="n ${utilCls(st.peakUtil)}">${pct(st.peakUtil)}</td></tr></table></div></div>
+ <div class="card"><h2>Management analysis</h2><ul class="ins">${ins.map(i=>`<li class="${i.k==='bad'?'neg':i.k==='good'?'pos':i.k==='warn'?'warn':''}">${i.t}</li>`).join('')}</ul><p class="muted small">Calculated from the imported statements. Highlight threshold ±${S.settings.highlight}% (Settings).</p></div>
+ <div class="card"><h2>${esc(P.label)} vs ${esc(P.pl)}</h2><div class="tw" style="max-height:none"><table><thead><tr><th>Measure</th><th class="n">Previous</th><th class="n">Current</th><th class="n">Change</th><th class="n">%</th></tr></thead><tbody>
+ ${cmpRow('Total credits',st.cr,pv.cr,false)}${cmpRow('Total debits',st.dr,pv.dr,true)}${cmpRow('Income (collections)',st.income,pv.income,false)}${cmpRow('Supplier / purchase payments',st.pay,pv.pay,true)}${cmpRow('Expenses',st.exp,pv.exp,true)}
+ ${cmpRow('Net cash flow',st.net,pv.net,false)}${cmpRow('Closing balance',st.closing,pv.closing,false)}${cmpRow('Closing OD utilisation',st.util,pv.util,true,true)}${cmpRow('Peak OD utilisation',st.peakUtil,pv.peakUtil,true,true)}</tbody></table></div>
+ ${!pv.tx.length?'<p class="muted small">No data for the previous period yet — the comparison fills in once it is uploaded.</p>':''}</div>
+ <h3>Income</h3><div class="g2"><div class="card"><h2>Income ${rs(st.income)} ${badge('ACTUAL')}</h2><table><thead><tr><th>Collection type</th><th class="n">Amount</th><th class="n">%</th></tr></thead><tbody>
+ ${incCats.map(c=>`<tr><td>${c.cat}</td><td class="n ${c.val<0?'neg':''}">${fmt(c.val)}</td><td class="n">${st.income?pct(c.val/st.income):''}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">No income in this period.</td></tr>'}</tbody></table>
+ ${ids.length>1?`<h3>By account / bank</h3><table>${Object.entries(st.byAcc).map(([a,v])=>`<tr><td>${esc(accName(a))}</td><td class="n">credits ${fmt(v.cr)}</td><td class="n">debits ${fmt(v.dr)}</td></tr>`).join('')}</table>`:''}</div>
+ <div class="card"><h2>By customer</h2><div class="tw" style="max-height:300px"><table><thead><tr><th>Customer</th><th class="n">Amount</th><th class="n">%</th></tr></thead><tbody>${parties.map(([k,v])=>`<tr><td>${esc(k)}</td><td class="n">${fmt(v)}</td><td class="n">${st.income?pct(v/st.income):''}</td></tr>`).join('')}</tbody></table></div>
+ ${st.byParty.Unassigned?`<p class="muted small">“Unassigned” = no customer rule yet. Add a customer name when reviewing, or add a rule in Settings.</p>`:''}</div></div>
+ <div class="g2"><div class="card"><h2>Collections vs payments by ${long?'month':'week of month'}</h2>${chartBox('rWeek',{type:'bar',data:{labels:bk,datasets:[{label:'Income',data:bk.map(k=>(buckets[k]||{}).i||0),backgroundColor:COLORS.ok},{label:'Payments + expenses',data:bk.map(k=>(buckets[k]||{}).o||0),backgroundColor:COLORS.bad}]},options:{maintainAspectRatio:false,scales:{y:moneyAxis},plugins:{tooltip:tipMoney}}},250)}</div>
+ <div class="card"><h2>Top collections</h2><div class="tw" style="max-height:260px"><table><thead><tr><th>Date</th><th>Customer / description</th><th class="n">Amount</th></tr></thead><tbody>${top.map(t=>`<tr><td>${dmy(t.date)}</td><td>${esc(t.party||t.desc)}</td><td class="n">${fmt(t.cr)}</td></tr>`).join('')}</tbody></table></div></div></div>
+ <div class="card"><h2>Overdue / expected collections ${badge('EXPECTED')}</h2>${expPlans.length?`<table><thead><tr><th>Due</th><th>Type</th><th>Customer</th><th class="n">Amount</th><th>Status</th></tr></thead><tbody>${expPlans.map(x=>`<tr><td>${dmy(x.date)}</td><td>${PLAN_KINDS[x.kind].label}</td><td>${esc(x.party)}</td><td class="n">${fmt(x.amount)}</td><td>${x.date<todayIso()?'<span class="b b-red">OVERDUE</span>':badge('EXPECTED')}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">No expected collections entered. Add them under <a href="#plans">Commitments</a> — they drive the forecast.</p>'}</div>
+ <h3>Payments & expenses</h3><div class="g2"><div class="card"><h2>Payments + expenses ${rs(outTotal)} ${badge('ACTUAL')}</h2><table><thead><tr><th>Category</th><th class="n">Amount</th><th class="n">%</th></tr></thead><tbody>
+ ${outCats.map(c=>`<tr><td>${c.cat} <span class="muted small">${c.g==='PAYMENT'?'payment':''}</span></td><td class="n">${fmt(c.val)}</td><td class="n">${outTotal?pct(c.val/outTotal):''}</td></tr>`).join('')}<tr class="tot"><td>Total</td><td class="n">${fmt(outTotal)}</td><td class="n">100%</td></tr></tbody></table>
+ ${othCats.length?`<h3>Not counted as income or expense</h3><table>${othCats.map(c=>`<tr><td>${c.cat}</td><td class="n">in ${fmt(c.cr)}</td><td class="n">out ${fmt(c.dr)}</td></tr>`).join('')}</table>`:''}</div>
+ <div class="card"><h2>Share by category</h2>${chartBox('rExp',{type:'doughnut',data:{labels:outCats.map(c=>c.cat),datasets:[{data:outCats.map(c=>Math.max(0,c.val)),backgroundColor:PALETTE}]},options:{maintainAspectRatio:false,plugins:{legend:{position:'right'},tooltip:{callbacks:{label:c=>`${c.label}: ${rs(c.parsed)}`}}}}},280)}</div></div>
+ <h3>Cash-flow trend</h3><div class="card"><div class="row sb noprint"><h2>Monthly trend ${badge('ACTUAL')}</h2>${long?'':`<div class="row">${[3,6,12].map(n=>`<button class="sm ${S.ui.trendN===n?'p':''}" data-act="trendN" data-n="${n}">${n} months</button>`).join('')}</div>`}</div>
+ <div class="g2"><div>${trendChart('rTrend',tr,260)}</div><div>${chartBox('rUtil',{type:'line',data:{labels:tr.map(r=>monthLabel(r.m)),datasets:[{label:'Opening balance',data:tr.map(r=>r.opening),borderColor:COLORS.grey,yAxisID:'y'},{label:'Closing balance',data:tr.map(r=>r.closing),borderColor:COLORS.pri,yAxisID:'y'},{label:'Peak OD utilisation %',data:tr.map(r=>r.peak==null?null:+(r.peak*100).toFixed(1)),borderColor:COLORS.bad,yAxisID:'y1'},{label:'Closing OD utilisation %',data:tr.map(r=>r.util==null?null:+(r.util*100).toFixed(1)),borderColor:COLORS.warn,borderDash:[5,4],yAxisID:'y1'}]},options:{maintainAspectRatio:false,scales:{y:moneyAxis,y1:{position:'right',min:0,suggestedMax:100,grid:{drawOnChartArea:false},ticks:{callback:v=>v+'%'}}},plugins:{tooltip:{callbacks:{label:c=>c.dataset.yAxisID==='y1'?`${c.dataset.label}: ${c.parsed.y}%`:`${c.dataset.label}: ${rs(c.parsed.y)}`}}}}},260)}</div></div>
+ <div class="tw" style="margin-top:10px;max-height:none"><table><thead><tr><th>Month</th><th class="n">Opening</th><th class="n">Income</th><th class="n">Pay + exp</th><th class="n">Net cash</th><th class="n">Closing</th><th class="n">Closing OD %</th><th class="n">Peak OD %</th></tr></thead><tbody>${tr.map(r=>`<tr><td>${monthLabel(r.m)}</td><td class="n">${fmt(r.opening)}</td><td class="n">${fmt(r.inc)}</td><td class="n">${fmt(r.out)}</td><td class="n ${r.net<0?'neg':''}">${fmt(r.net)}</td><td class="n">${fmt(r.closing)}</td><td class="n">${pct(r.util)}</td><td class="n ${utilCls(r.peak)}">${pct(r.peak)}</td></tr>`).join('')}</tbody></table></div></div>
+ ${pat?`<h3>Cash-flow problem detection</h3><div class="card"><p class="muted small" style="margin-top:0">Based on the last ${pat.months.length} complete months. Data-based observations only — no decisions are executed.</p>
+ ${pat.cards.map(c=>`<div class="al att"><div class="a" style="margin-top:0"><b>Problem</b>${c.problem}</div><div class="a"><b>Observation</b>${c.obs}</div><div class="a"><b>Management consideration</b>${c.con}</div></div>`).join('')||'<div class="al ok small">No strong timing mismatch between payments and collections.</div>'}
+ ${chartBox('rPat',{type:'bar',data:{labels:pat.bl.map(b=>'Days '+b),datasets:[{label:'% of collections',data:pat.incS.map(x=>+(x*100).toFixed(1)),backgroundColor:COLORS.ok},{label:'% of supplier payments',data:pat.supS.map(x=>+(x*100).toFixed(1)),backgroundColor:COLORS.pur},{label:'% of all payments + expenses',data:pat.payS.map(x=>+(x*100).toFixed(1)),backgroundColor:COLORS.bad}]},options:{maintainAspectRatio:false,scales:{y:{ticks:{callback:v=>v+'%'}}}}},220)}</div>`:''}`;
+};
+CHG.rpType=el=>{S.ui.rp={type:el.value};rerender();};CHG.rpKey=el=>{S.ui.rp.key=el.value;rerender();};
+CHG.rpQ=el=>{const[y,q]=el.value.split('-').map(Number);S.ui.rp.y=y;S.ui.rp.q=q;rerender();};CHG.rpY=el=>{S.ui.rp.y=+el.value;rerender();};
+CHG.rpFrom=el=>{S.ui.rp.from=el.value;rerender();};CHG.rpTo=el=>{S.ui.rp.to=el.value;rerender();};
+ACT.trendN=b=>{S.ui.trendN=+b.dataset.n;rerender();};ACT.print=()=>window.print();
+ACT.exportPeriod=()=>{const P=resolvePeriod(accIds());const l=S.txns.filter(t=>accIds().includes(t.acc)&&t.date>=P.cur.from&&t.date<=P.cur.to).sort(txSort);download(`bank_${P.cur.from}_${P.cur.to}.csv`,txCsv(l),'text/csv');};
+
+/* ---- Commitments (expected + planned) ---- */
+VIEWS.plans=()=>{
+ const ids=accIds(),today=todayIso(),asOf=latestC(ids);const e=S.ui.editPlan?S.plans.find(p=>p.id===S.ui.editPlan):null;
+ const open=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)).sort((a,b)=>a.date<b.date?-1:1),closed=S.plans.filter(p=>p.status!=='open'&&ids.includes(p.acc)).sort((a,b)=>a.date>b.date?-1:1);
+ const accs=S.accounts;const k=e?e.kind:'COLLECTION';
+ const inT=sum(open.filter(p=>PLAN_KINDS[p.kind].sign>0),p=>p.amount),outT=sum(open.filter(p=>PLAN_KINDS[p.kind].sign<0),p=>p.amount);
+ return`<h1>Future commitments</h1><p class="muted" style="margin-top:-8px">Enter what is expected to come in and go out. These drive the forecast and the OD warnings. ${badge('EXPECTED')} = committed (collections due, cheques received/issued). ${badge('PLANNED')} = management's plan (scheduled payments).</p>
+ ${!accs.length?'<div class="al att">Add a bank account first (upload a statement, or Settings → Bank accounts).</div>':`<div class="card"><h2>${e?'Edit commitment':'Add commitment'}</h2><div class="form">
+ <label>Type<select id="pk">${Object.entries(PLAN_KINDS).map(([v,o])=>`<option value="${v}" ${k===v?'selected':''}>${o.label}</option>`).join('')}</select></label>
+ <label>Date<input type="date" id="pd" value="${e?e.date:(asOf&&asOf>today?addDays(asOf,1):today)}"></label>
+ <label>Amount (Rs.)<input type="number" id="pa" min="0" step="0.01" value="${e?e.amount:''}"></label>
+ <label>Customer / supplier<input id="pp" value="${esc(e?e.party:'')}"></label>
+ <label>Account<select id="pacc">${accs.map(a=>`<option value="${a.id}" ${(e?e.acc:ids[0])===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+ <label>Cheque no. (for cheques)<input id="pc" value="${esc(e?e.chq:'')}"></label>
+ <label>Note<input id="pn" value="${esc(e?e.note:'')}"></label>
+ <label class="ck"><input type="checkbox" id="pf" ${(e?e.flexible:PLAN_KINDS[k].flex)?'checked':''}> Date can be moved (flexible)</label>
+ <div class="row"><button class="p" data-act="savePlan">${e?'Save changes':'Add'}</button>${e?'<button data-act="cancelEdit">Cancel</button>':''}</div></div>
+ <p class="muted small">Tick “flexible” for payments whose date management could move (e.g. supplier payments). The OD analysis only suggests moving flexible items. Salaries and issued cheques should stay unticked.</p></div>`}
+ <div class="card"><div class="row sb"><h2>Open (${open.length})</h2><span class="small">In ${rs(inT)} · Out ${rs(outT)} · Net <b class="${inT-outT<0?'neg':'pos'}">${rs(inT-outT)}</b></span></div>
+ ${open.length?`<div class="tw"><table><thead><tr><th>Date</th><th>Data</th><th>Type</th><th>Customer / supplier</th><th class="n">In</th><th class="n">Out</th><th>Chq</th><th>Flexible</th><th></th></tr></thead><tbody>
+ ${open.map(p=>{const o=PLAN_KINDS[p.kind];const late=p.date<today;return`<tr><td>${dmy(p.date)}${late?' <span class="b b-red">OVERDUE</span>':''}</td><td>${badge(o.type)}</td><td>${o.label}${S.accounts.length>1?`<div class="muted small">${esc(accName(p.acc))}</div>`:''}${p.note?`<div class="muted small">${esc(p.note)}</div>`:''}</td><td>${esc(p.party)}</td><td class="n">${o.sign>0?fmt(p.amount):''}</td><td class="n">${o.sign<0?fmt(p.amount):''}</td><td>${esc(p.chq||'')}</td><td>${p.flexible?'Yes':''}</td>
+ <td style="white-space:nowrap"><button class="sm" data-act="editPlan" data-id="${p.id}">Edit</button> <button class="sm" data-act="planDone" data-id="${p.id}" title="It has happened">Done</button> <button class="sm" data-act="planCancel" data-id="${p.id}">Cancel</button> <button class="sm d" data-act="planDel" data-id="${p.id}">✕</button></td></tr>`;}).join('')}</tbody></table></div>`:'<p class="muted">Nothing entered yet.</p>'}
+ <p class="muted small">Expected cheques with a cheque number are closed automatically when a later statement shows them cleared. Mark other items <b>Done</b> once they appear in the bank, so they are not counted twice.</p></div>
+ ${closed.length?`<div class="card"><details><summary>Done / cancelled (${closed.length})</summary><div class="tw"><table><tbody>${closed.map(p=>`<tr class="dim"><td>${dmy(p.date)}</td><td>${PLAN_KINDS[p.kind].label}</td><td>${esc(p.party)}</td><td class="n">${fmt(p.amount)}</td><td>${p.status}${p.doneNote?' · '+esc(p.doneNote):''}</td><td><button class="sm" data-act="planReopen" data-id="${p.id}">Reopen</button></td></tr>`).join('')}</tbody></table></div></details></div>`:''}`;
+};
+ACT.savePlan=async()=>{
+ const amt=+$('#pa').value,date=$('#pd').value;if(!date)return toast('Enter a date.');if(!(amt>0))return toast('Enter an amount above zero.');
+ const e=S.ui.editPlan?S.plans.find(p=>p.id===S.ui.editPlan):null;
+ const p={...(e||{id:uid(),status:'open',created:Date.now()}),kind:$('#pk').value,date,amount:round2(amt),party:$('#pp').value.trim(),acc:$('#pacc').value,chq:digits($('#pc').value),note:$('#pn').value.trim(),flexible:$('#pf').checked};
+ await DB.put('plans',p);if(e)Object.assign(e,p);else S.plans.push(p);S.ui.editPlan=null;toast(e?'Updated.':'Added.');rerender();};
+ACT.editPlan=b=>{S.ui.editPlan=b.dataset.id;render();};ACT.cancelEdit=()=>{S.ui.editPlan=null;rerender();};
+const setPlan=async(id,st,note)=>{const p=S.plans.find(x=>x.id===id);p.status=st;p.doneNote=note||'';await DB.put('plans',p);rerender();};
+ACT.planDone=b=>setPlan(b.dataset.id,'done','Marked done');ACT.planCancel=b=>setPlan(b.dataset.id,'cancelled');ACT.planReopen=b=>setPlan(b.dataset.id,'open');
+ACT.planDel=async b=>{if(!confirm('Delete this commitment?'))return;await DB.del('plans',b.dataset.id);S.plans=S.plans.filter(p=>p.id!==b.dataset.id);rerender();};
+
+/* ---- Forecast & OD ---- */
+function evRow(e){return`${badge(e.type)} ${esc(e.party||e.kindLabel)} <b class="${e.amt<0?'neg':'pos'}">${e.amt<0?'−':'+'}${fmt(Math.abs(e.amt))}</b>${e.flexible?' <span class="b b-grey">FLEX</span>':''}${e.late?' <span class="b b-red">OVERDUE</span>':''}`;}
+VIEWS.forecast=()=>{
+ const ids=accIds();const hz=S.ui.hz||S.settings.horizon;const f=forecast(ids,{horizon:hz,baseline:S.settings.baseline});
+ if(!f)return`<h1>Forecast & OD</h1><div class="card">Upload a statement first — the forecast starts from the latest actual bank balance.</div>`;
+ const an=odAnalysis(f);const E=f.events;const s=k=>sum(E.filter(e=>e.kind===k),e=>Math.abs(e.amt));
+ const inflow=sum(E.filter(e=>e.amt>0),e=>e.amt),outflow=sum(E.filter(e=>e.amt<0),e=>-e.amt);
+ const eq=[['Current bank position','ACTUAL',f.startBal,`as of ${dmy(f.asOf)}`],['+ Expected collections','EXPECTED',s('COLLECTION')],['+ Expected incoming cheques','EXPECTED',s('CHQ_IN')],['+ Planned other inflows','PLANNED',s('INFLOW')],
+  ['− Scheduled purchases / supplier payments','PLANNED',-s('SUPPLIER')],['− Scheduled expenses','PLANNED',-s('EXPENSE')],['− Outgoing cheques issued','EXPECTED',-s('CHQ_OUT')]];
+ if(f.baseInfo)eq.push(['± Typical flow (3-month average)','FORECAST',f.base*f.horizon,`${rs(f.base)}/day from ${f.baseInfo.months.map(monthLabel).join(', ')}`]);
+ let risk;
+ if(an){risk=`<div class="al high"><div class="t" style="font-size:16px">🔴 OD LIMIT RISK</div><div>Projected OD requirement exceeds the available facility.</div>
+ <div class="grid" style="margin-top:10px">${kpi('Date of expected breach',dmy(f.breach.date),'FORECAST','',true)}${kpi('Excess on that day',rs(f.breach.excess),'FORECAST','',true)}${kpi('Peak excess',rs(f.peakExcess),'FORECAST','on '+dmy(f.peakDate),true)}${kpi('Funding required',rs(f.peakExcess),'FORECAST','to stay within the limit')}</div>
+ <h3>Transactions contributing to the breach (up to ${dmy(an.b)})</h3><table><tbody>${an.outs.slice(0,10).map(e=>`<tr><td>${dmy(e.eff)}</td><td>${evRow(e)}</td></tr>`).join('')}</tbody></table>
+ <div class="g2" style="margin-top:8px"><div><h3>Expected collections before the breach</h3>${an.before.length?`<table><tbody>${an.before.map(e=>`<tr><td>${dmy(e.eff)}</td><td>${evRow(e)}</td></tr>`).join('')}</tbody></table>`:'<p class="small">None.</p>'}</div>
+ <div><h3>Expected collections after the breach (45 days)</h3>${an.after.length?`<table><tbody>${an.after.map(e=>`<tr><td>${dmy(e.eff)}</td><td>${evRow(e)}</td></tr>`).join('')}</tbody></table>`:'<p class="small">None entered.</p>'}</div></div>
+ <h3>Possible payment scheduling options</h3>${an.resched.length?`<table><tbody>${an.resched.map(e=>`<tr><td>${evRow(e)}</td><td>${dmy(e.eff)} → <b>${dmy(e.newDate)}</b></td></tr>`).join('')}</tbody></table>
+ <p class="small">If all ${an.resched.length} flexible payment${an.resched.length>1?'s':''} (${rs(an.flexTotal)}) move to ${dmy(an.newDate)}: ${an.scenA.breach?`<b class="neg">the breach still occurs on ${dmy(an.scenA.breach.date)} (peak excess ${rs(an.scenA.peakExcess)})</b>`:`<b class="pos">no breach — peak OD utilisation ${pct(an.scenA.maxUtil)} on ${dmy(an.scenA.maxODDate)}</b>`}.</p>`:'<p class="small">No payments before the breach are marked flexible. Mark movable payments as “flexible” in Commitments to see options.</p>'}
+ <h3>Possible collection acceleration options</h3>${an.accel.length?`<p class="small">If the collections due after the breach (${rs(sum(an.accel,e=>e.amt))}) are received by ${dmy(an.accelDate)}: ${an.scenB.breach?`<b class="neg">the breach still occurs on ${dmy(an.scenB.breach.date)} (peak excess ${rs(an.scenB.peakExcess)})</b>`:`<b class="pos">no breach</b>`}.</p><table><tbody>${an.accel.slice(0,8).map(e=>`<tr><td>${evRow(e)}</td><td>${dmy(e.eff)} → ${dmy(e.newDate)}</td></tr>`).join('')}</tbody></table>`:'<p class="small">No expected collections after the breach date.</p>'}
+ <p class="small muted" style="margin-top:8px">These are options for management to review. The system does not change any payment.</p></div>`;}
+ else if(f.maxUtil!=null&&f.maxUtil>=0.85)risk=`<div class="al att"><div class="t">🟠 OD utilisation projected to reach ${pct(f.maxUtil)} on ${dmy(f.maxODDate)}</div><div class="small">Headroom falls to ${rs(f.limit-f.maxOD)}. Review upcoming non-critical payments and expected collections.</div></div>`;
+ else risk=`<div class="al ok"><div class="t">🟢 Projected cash flow remains within the approved OD facility</div><div class="small">${f.limit?`Peak projected OD use ${rs(f.maxOD)} (${pct(f.maxUtil)}) on ${dmy(f.maxODDate)}.`:'No OD limit set for this account.'}</div></div>`;
+ const evDays=f.days.filter(d=>d.ev.length);
+ return`<h1>Cash-flow forecast & OD control</h1>
+ <div class="card noprint"><div class="form"><label>Horizon<select data-chg="hz">${[30,60,90,120].map(n=>`<option value="${n}" ${hz===n?'selected':''}>${n} days</option>`).join('')}</select></label>
+ <label class="ck"><input type="checkbox" data-chg="baseline" ${S.settings.baseline?'checked':''}> Add typical monthly flow (3-month average)</label><div class="row"><a class="btn" href="#plans">Edit commitments →</a></div></div>
+ <p class="muted small">Leave the average flow off if you enter all expected collections and payments yourself — otherwise they are counted twice.</p></div>
+ <div class="grid">${kpi('Starting balance',rs(f.startBal),'ACTUAL','as of '+dmy(f.asOf),f.startBal<0)}${kpi('Expected + planned inflows',rs(inflow),'EXPECTED','next '+f.horizon+' days')}${kpi('Committed + planned outflows',rs(outflow),'PLANNED','next '+f.horizon+' days')}
+ ${kpi('Projected balance '+dmy(f.end),rs(f.endBal),'FORECAST','',f.endBal<0)}${kpi('Projected lowest balance',rs(f.min.bal),'FORECAST','on '+dmy(f.min.date),f.min.bal<0)}${kpi('Available OD at lowest point',f.limit?rs(f.limit+f.min.bal):'–','FORECAST','',f.limit&&f.limit+f.min.bal<0)}</div>
+ ${risk}
+ <div class="g2"><div class="card"><h2>Balance projection</h2>${forecastChart('fChart',ids,f,300)}</div>
+ <div class="card"><h2>Projected bank position</h2><table class="eq">${eq.map(([l,t,v,n])=>`<tr><td>${l} ${badge(t)}${n?`<div class="muted small">${n}</div>`:''}</td><td class="n ${v<0?'neg':''}">${fmt(v)}</td></tr>`).join('')}
+ <tr class="res"><td>= Projected bank position ${dmy(f.end)} ${badge('FORECAST')}</td><td class="n ${f.endBal<0?'neg':''}">${fmt(f.endBal)}</td></tr></table>
+ ${f.beyond?`<p class="muted small">${f.beyond} commitment${f.beyond>1?'s':''} dated after ${dmy(f.end)} not included — extend the horizon to see them.</p>`:''}
+ ${E.some(e=>e.late)?`<p class="small warn">Overdue items are counted on ${dmy(f.start)} (the first forecast day). Update their dates if they will be later.</p>`:''}</div></div>
+ <div class="card"><h2>Day-by-day (days with movements)</h2>${evDays.length?`<div class="tw"><table><thead><tr><th>Date</th><th>Movements</th><th class="n">In</th><th class="n">Out</th><th class="n">Projected balance</th><th class="n">OD use</th></tr></thead><tbody>
+ ${evDays.map(d=>`<tr><td>${dmy(d.date)}</td><td>${d.ev.map(evRow).join('<br>')}</td><td class="n">${d.inn?fmt(d.inn):''}</td><td class="n">${d.out?fmt(d.out):''}</td><td class="n ${f.limit&&d.od>f.limit?'neg':''}">${fmt(d.bal)}</td><td class="n ${utilCls(f.limit?d.od/f.limit:null)}">${f.limit?pct(d.od/f.limit):'–'}</td></tr>`).join('')}</tbody></table></div>`:'<p class="muted">No commitments entered for this period. <a href="#plans">Add expected collections and payments</a>.</p>'}</div>`;
+};
+CHG.hz=el=>{S.ui.hz=+el.value;rerender();};
+CHG.baseline=async el=>{S.settings.baseline=el.checked;await saveSettings();rerender();};
+
+/* ---- Action center ---- */
+VIEWS.actions=()=>{const items=actionItems(accIds());
+ return`<h1>What should management do?</h1><p class="muted" style="margin-top:-8px">Calculated from actual bank data and the commitments entered. Suggestions for review only.</p>${items.map(alertHtml).join('')}`;};
+
+/* ---- Cheques ---- */
+VIEWS.cheques=()=>{
+ const ids=accIds();const g={};S.txns.filter(t=>t.chq&&ids.includes(t.acc)).forEach(t=>(g[t.acc+'|'+t.chq]||(g[t.acc+'|'+t.chq]=[])).push(t));
+ const rows=Object.values(g).map(l=>{l.sort(txSort);const first=l.find(t=>!RET_RX.test(t.desc))||l[0];const ret=l.find(t=>RET_RX.test(t.desc));
+  return{chq:first.chq,date:first.date,amt:first.cr||first.dr,type:first.cr>first.dr?'Incoming':'Outgoing',status:ret?'Returned':'Cleared',clear:ret?ret.date:first.date,party:first.party||first.desc,acc:first.acc};});
+ S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&(p.kind==='CHQ_IN'||p.kind==='CHQ_OUT')).forEach(p=>rows.push({chq:p.chq||'—',date:p.date,amt:p.amount,type:p.kind==='CHQ_IN'?'Incoming':'Outgoing',status:'Pending',clear:'',party:p.party,acc:p.acc}));
+ rows.sort((a,b)=>a.date<b.date?1:-1);const f=S.ui.cf||'';const show=rows.filter(r=>!f||r.type===f||r.status===f);
+ const t=k=>sum(rows.filter(r=>r.status===k),r=>r.amt);const n=k=>rows.filter(r=>r.status===k).length;
+ return`<h1>Cheque register</h1><p class="muted" style="margin-top:-8px">Built automatically from cheque numbers found in the statements. Pending cheques come from <a href="#plans">Commitments</a>. Clearing date = the date the bank posted it.</p>
+ <div class="grid">${kpi('Cleared',rs(t('Cleared')),'ACTUAL',n('Cleared')+' cheques')}${kpi('Returned',rs(t('Returned')),'ACTUAL',n('Returned')+' cheques',t('Returned')>0)}${kpi('Pending',rs(t('Pending')),'EXPECTED',n('Pending')+' cheques')}</div>
+ <div class="card"><div class="row noprint" style="margin-bottom:8px">${['','Incoming','Outgoing','Cleared','Returned','Pending'].map(k=>`<button class="sm ${f===k?'p':''}" data-act="cf" data-k="${k}">${k||'All'}</button>`).join('')}</div>
+ <div class="tw"><table><thead><tr><th>Cheque</th><th>Date</th><th>Customer / supplier</th><th>Type</th><th class="n">Amount</th><th>Status</th><th>Clearing date</th></tr></thead><tbody>
+ ${show.map(r=>`<tr><td>${esc(r.chq)}</td><td>${dmy(r.date)}</td><td>${esc(r.party)}${S.accounts.length>1?`<div class="muted small">${esc(accName(r.acc))}</div>`:''}</td><td>${r.type}</td><td class="n">${fmt(r.amt)}</td><td>${r.status==='Returned'?'<span class="b b-red">RETURNED</span>':r.status==='Pending'?badge('EXPECTED')+' Pending':'<span class="b b-ACTUAL">CLEARED</span>'}</td><td>${r.clear?dmy(r.clear):''}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No cheques found.</td></tr>'}</tbody></table></div></div>`;
+};
+ACT.cf=b=>{S.ui.cf=b.dataset.k;rerender();};
+
+/* ---- Upload history ---- */
+VIEWS.history=()=>{const ids=accIds();const l=S.statements.filter(s=>ids.includes(s.acc)).sort((a,b)=>a.from<b.from?1:-1);
+ return`<h1>Upload history</h1><div class="card">${l.length?`<div class="tw"><table><thead><tr><th>File</th><th>Month</th><th>Account</th><th>Uploaded</th><th class="n">Transactions</th><th class="n">Opening</th><th class="n">Closing</th><th>Status</th><th></th></tr></thead><tbody>
+ ${l.map(s=>`<tr><td>${esc(s.file)}</td><td>${monthLabel(monthKey(s.to))}<div class="muted small">${dmy(s.from)}–${dmy(s.to)}</div></td><td>${esc(accName(s.acc))}</td><td>${dmy(s.uploaded.slice(0,10))}${s.reprocessed?`<div class="muted small">reprocessed ${dmy(s.reprocessed.slice(0,10))}</div>`:''}</td><td class="n">${s.imported}${s.dups?`<div class="muted small">${s.dups} skipped</div>`:''}</td><td class="n">${fmt(s.opening)}</td><td class="n">${fmt(s.closing)}</td>
+ <td>${/UNRECON/.test(s.status)?`<span class="b b-red">UNRECONCILED</span><div class="small">diff ${rs(s.recon)}</div>`:/no balances/.test(s.status)?'<span class="b b-EXPECTED">NOT RECONCILED</span>':'<span class="b b-ACTUAL">IMPORTED</span>'}</td>
+ <td style="white-space:nowrap"><button class="sm" data-act="hView" data-id="${s.id}">View</button> <button class="sm" data-act="hRe" data-id="${s.id}" ${s.fileId?'':'disabled'}>Reprocess</button> <button class="sm" data-act="hDl" data-id="${s.id}" ${s.fileId?'':'disabled'}>Original</button> <button class="sm d" data-act="hDel" data-id="${s.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>
+ <p class="muted small">Reprocess re-reads the stored file with the current mapping and rules, then replaces that statement (categories you set by hand are kept). Delete removes the statement and its transactions. Demo statements have no stored file.</p>`:'<p class="muted">No statements yet.</p>'}</div>`;};
+ACT.hView=b=>{S.ui.tf={q:'',m:'',cat:'',stmt:b.dataset.id};location.hash='#txns';};
+ACT.hDl=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);const f=await DB.get('files',s.fileId);if(!f)return toast('Original file not stored.');download(f.name,new Blob([f.data],{type:f.type||'application/octet-stream'}));};
+ACT.hRe=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);const f=await DB.get('files',s.fileId);if(!f)return toast('Original file not stored.');await handleFile(new File([f.data],f.name,{type:f.type}),s);};
+ACT.hDel=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);if(!confirm(`Delete ${s.file} and its ${s.imported} transactions? This cannot be undone.`))return;
+ const ids=S.txns.filter(t=>t.stmt===s.id).map(t=>t.id);await DB.delMany('txns',ids);await DB.del('statements',s.id);if(s.fileId)await DB.del('files',s.fileId);
+ S.txns=S.txns.filter(t=>t.stmt!==s.id);S.statements=S.statements.filter(x=>x.id!==s.id);derive();toast('Deleted.');rerender();};
+
+/* ---- Settings ---- */
+VIEWS.settings=()=>{const st=S.settings;const ur=S.rules.filter(r=>!r.builtin).sort((a,b)=>(b.created||0)-(a.created||0)),br=S.rules.filter(r=>r.builtin).sort((a,b)=>a.ord-b.ord);
+ return`<h1>Settings</h1>
+ <div class="card"><h2>General</h2><div class="form">
+ <label>Company name<input data-chg="set" data-f="org" value="${esc(st.org)}"></label>
+ <label>Financial year starts<select data-chg="set" data-f="fyStart" data-num="1">${MON.map((m,i)=>`<option value="${i+1}" ${st.fyStart===i+1?'selected':''}>${m}</option>`).join('')}</select></label>
+ <label>Date format in files<select data-chg="set" data-f="dateOrder">${[['AUTO','Automatic (day first if unclear)'],['DMY','Day/Month/Year'],['MDY','Month/Day/Year']].map(([v,l])=>`<option value="${v}" ${st.dateOrder===v?'selected':''}>${l}</option>`).join('')}</select></label>
+ <label>Highlight changes above (%)<input type="number" min="1" max="100" data-chg="set" data-f="highlight" data-num="1" value="${st.highlight}"></label>
+ <label>Default forecast horizon (days)<input type="number" min="14" max="180" data-chg="set" data-f="horizon" data-num="1" value="${st.horizon}"></label></div></div>
+ <div class="card"><div class="row sb"><h2>Bank accounts & OD limits</h2><button data-act="addAcc">+ Add account</button></div>
+ <div class="tw"><table><thead><tr><th>Name</th><th>Bank</th><th>Account no.</th><th class="n">Approved OD limit (Rs.)</th><th class="n">Transactions</th><th></th></tr></thead><tbody>
+ ${S.accounts.map(a=>`<tr><td><input data-chg="accEdit" data-id="${a.id}" data-f="name" value="${esc(a.name)}"></td><td><input data-chg="accEdit" data-id="${a.id}" data-f="bank" value="${esc(a.bank)}" size="14"></td><td><input data-chg="accEdit" data-id="${a.id}" data-f="number" value="${esc(a.number)}" size="14"></td><td class="n"><input type="number" min="0" data-chg="accEdit" data-id="${a.id}" data-f="odLimit" value="${a.odLimit||0}" style="text-align:right;width:140px"></td><td class="n">${S.txns.filter(t=>t.acc===a.id).length}</td><td><button class="sm d" data-act="delAcc" data-id="${a.id}">✕</button></td></tr>`).join('')||'<tr><td colspan="6" class="muted">No accounts yet — one is created on the first upload.</td></tr>'}</tbody></table></div></div>
+ <div class="card"><h2>Classification rules</h2><p class="muted small" style="margin-top:0">If the description contains any of the keywords (comma-separated), the category and customer/supplier are set. Your rules are checked first, newest first, then the built-in rules.</p>
+ <div class="form"><label>Keywords<input id="nrW" placeholder="e.g. KEELLS, JKH"></label><label>Money<select id="nrD"><option value="any">In or out</option><option value="in">In only</option><option value="out">Out only</option></select></label><label>Category<select id="nrC">${catOptions('Customer Collection')}</select></label><label>Customer / supplier<input id="nrP"></label><div class="row"><button class="p" data-act="addRule">Add rule</button><button data-act="rerun">Re-run rules on all transactions</button></div></div>
+ <div class="tw" style="margin-top:10px"><table><thead><tr><th>Keywords</th><th>Money</th><th>Category</th><th>Customer / supplier</th><th></th></tr></thead><tbody>${ur.map(ruleRow).join('')||'<tr><td colspan="5" class="muted">None yet — they are created when you classify “Needs review” items.</td></tr>'}</tbody></table></div>
+ <details style="margin-top:8px"><summary>Built-in rules (${br.length})</summary><div class="tw"><table><tbody>${br.map(ruleRow).join('')}</tbody></table></div></details></div>
+ <div class="card"><h2>Data</h2><p class="muted small" style="margin-top:0">All data is stored in this browser on this computer${MEMORY_ONLY?' — <b class="neg">storage is blocked in this browser, data is lost when the page closes</b>':''}. Take a backup after each monthly upload. Backups do not include the original statement files.</p>
+ <div class="row"><button data-act="backup">Download backup</button><label class="btn">Restore backup<input type="file" accept=".json" data-chg="restore" style="display:none"></label><button data-act="exportAll">Export all transactions (CSV)</button><button data-act="demo">Load demo data</button><button class="d" data-act="wipe">Delete all data</button></div></div>`;};
+const ruleRow=r=>`<tr><td>${esc(r.words)}</td><td>${{any:'In/out',in:'In',out:'Out'}[r.dir]}</td><td>${r.cat}</td><td>${esc(r.party)}</td><td><button class="sm d" data-act="delRule" data-id="${r.id}">✕</button></td></tr>`;
+CHG.set=async el=>{S.settings[el.dataset.f]=el.dataset.num?+el.value:el.value;await saveSettings();renderAccSel();toast('Saved.');};
+CHG.accEdit=async el=>{const a=S.accounts.find(x=>x.id===el.dataset.id);a[el.dataset.f]=el.dataset.f==='odLimit'?+el.value||0:el.value;await DB.put('accounts',a);renderAccSel();toast('Saved.');};
+ACT.addAcc=async()=>{const a={id:uid(),name:'New account',bank:'',number:'',odLimit:0};await DB.put('accounts',a);S.accounts.push(a);derive();rerender();};
+ACT.delAcc=async b=>{const id=b.dataset.id;if(S.txns.some(t=>t.acc===id))return toast('This account has transactions. Delete its statements in Upload history first.',5000);if(!confirm('Delete this account?'))return;await DB.del('accounts',id);S.accounts=S.accounts.filter(a=>a.id!==id);if(S.ui.acc===id)S.ui.acc='ALL';derive();rerender();};
+ACT.addRule=async()=>{const w=$('#nrW').value.split(',').map(normWords).filter(Boolean).join(',');if(!w)return toast('Enter at least one keyword.');
+ const r={id:uid(),words:w,dir:$('#nrD').value,cat:$('#nrC').value,party:$('#nrP').value.trim(),builtin:false,created:Date.now()};await DB.put('rules',r);S.rules.push(r);const n=await reapplyRules(false);toast(`Rule added${n?`; ${n} transaction${n>1?'s':''} classified`:''}.`);rerender();};
+ACT.delRule=async b=>{await DB.del('rules',b.dataset.id);S.rules=S.rules.filter(r=>r.id!==b.dataset.id);rerender();};
+ACT.rerun=async()=>{if(!confirm('Re-apply rules to every transaction? Categories you set by hand are kept.'))return;const n=await reapplyRules(true);derive();toast(`${n} transaction${n===1?'':'s'} updated.`);rerender();};
+ACT.backup=async()=>{const d={app:'bank-od-control',version:1,exported:new Date().toISOString()};for(const k of['accounts','statements','txns','rules','plans'])d[k]=S[k].map(({rb,...x})=>x);d.settings=S.settings;download(`bank-od-backup-${todayIso()}.json`,JSON.stringify(d),'application/json');};
+CHG.restore=async el=>{const f=el.files[0];if(!f)return;try{const d=JSON.parse(await f.text());if(d.app!=='bank-od-control')throw new Error('This is not a Bank & OD Control backup.');
+ if(!confirm('Replace ALL current data with this backup?'))return;for(const k of['accounts','statements','txns','rules','plans']){await DB.clear(k);await DB.putMany(k,d[k]||[]);}
+ await DB.put('settings',{...DEFAULT_SETTINGS,...d.settings,id:'main'});await loadAll();toast('Backup restored.');location.hash='#dash';render();}catch(e){toast(e.message,6000);}};
+ACT.exportAll=()=>download('all_transactions.csv',txCsv([...S.txns].sort(txSort)),'text/csv');
+ACT.wipe=async()=>{if(!confirm('Delete ALL accounts, statements, transactions, rules and commitments? This cannot be undone.'))return;if(!confirm('Are you sure? Download a backup first if you may need the data.'))return;
+ for(const k of STORES)await DB.clear(k);IMP=null;S.ui.acc='ALL';await loadAll();toast('All data deleted.');location.hash='#dash';render();};
+
+/* ---- Demo data (6 full months + this month to yesterday; the rest of this month and next month as commitments) ---- */
+function buildDemo(now,T={start:-7600000,e1:380000,e2:760000,l1:180000,l2:420000,s1:1000000,s2:1650000}){
+ let seed=20260401;const rnd=()=>(seed=(seed*48271)%2147483647)/2147483647;const between=(a,b)=>Math.round((a+rnd()*(b-a))/1000)*1000;
+ const acc={id:'demo-acc',name:'Commercial Bank – Current A/C (DEMO)',bank:'Commercial Bank',number:'1000123456',odLimit:10000000};
+ const today=iso(now),asOf=addDays(today,-1),curM=monthKey(today);
+ const months=[];for(let i=6;i>=0;i--)months.push(monthKey(addMonths(curM+'-01',-i))); // 6 full months + this month to yesterday
+ const cust=[['KEELLS','Keells Super'],['ARPICO','Arpico Supercentre'],['CARGILLS','Cargills Food City'],['LAUGFS','Laugfs Super'],['SATHOSA','Lanka Sathosa'],['GLOMARK','Glomark']];
+ const sup=[['PRIMA','Prima Ceylon'],['SERENDIB FLOUR','Serendib Flour Mills'],['CIC','CIC Holdings'],['DPL PACKAGING','DPL Packaging']];
+ const rules=[...cust.map(([k,n],i)=>({id:'demo-r'+i,words:k,dir:'in',cat:'Customer Collection',party:n,builtin:false,created:1000+i})),...sup.map(([k,n],i)=>({id:'demo-s'+i,words:k,dir:'out',cat:'Supplier Payment',party:n,builtin:false,created:2000+i}))];
+ let bal=T.start,chqOut=345001,chqIn=500100;const stmts=[],lists=[],future=[];
+ months.forEach((mk,mi)=>{
+  const isCur=mk===curM;const end=+monthEnd(mk).slice(8),list=[];const add=(d,desc,dr,cr,chq='')=>list.push({date:mk+'-'+pad(d),desc,dr,cr,chq});const drift=1-mi*0.012,grow=1+mi*0.02;
+  for(let d=1;d<=end;d++){const early=d<=10;const n=early?2+Math.floor(rnd()*2):(rnd()<0.6?1:0);
+   for(let k=0;k<n;k++){const c=cust[Math.floor(rnd()*cust.length)],r=rnd();const amt=Math.round(between(early?T.e1:T.l1,early?T.e2:T.l2)*drift/1000)*1000;
+    if(r<0.45)add(d,`CEFT FROM ${c[0]} ${Math.floor(rnd()*90000+10000)}`,0,amt);
+    else if(r<0.8){const no=chqIn++;add(d,`CHQ DEP ${no} ${c[0]}`,0,amt,String(no));}
+    else add(d,'CASH DEP NEGOMBO ROUTE',0,Math.round(amt*0.45/1000)*1000);}
+   if(d===5)add(d,'RENT - STORES PASYALA',350000,0);
+   if(d===15)add(d,'CEB BILL PAYMENT ACC 4521',between(640000,760000),0);
+   if(d%7===3)add(d,'FUEL - CEYPETCO FILLING STATION',between(150000,230000),0);
+   if(d===12||d===26)add(d,'LORRY HIRE - SAMAN TRANSPORT',between(220000,300000),0);
+   if(d===18)add(d,'POS 88213 M PERERA HARDWARE',between(60000,95000),0);
+   if(d===20&&mi%2===0)add(d,'GENERATOR REPAIR - LANKA POWER',between(90000,160000),0);
+   if(d===8&&mi%3===1)add(d,'ADVERT - LANKADEEPA',between(80000,120000),0);
+   if(d===25){add(d,'SALARY TRANSFER '+MON[+mk.slice(5)-1].toUpperCase(),4200000+mi*30000,0);add(d,'EPF ETF PAYMENT',560000,0);}
+   if(d>=24&&d<=29&&d%2===0)for(let k=0;k<2;k++){const s=sup[Math.floor(rnd()*sup.length)];const no=chqOut++;add(d,`CHQ ${no} ${s[0]}`,Math.round(between(T.s1,T.s2)*grow/1000)*1000,0,String(no));}
+  }
+  if(mi===3){const t=list.find(x=>x.chq&&x.cr&&+x.date.slice(8)<=6);if(t)add(+t.date.slice(8)+4,`CHQ RETURN ${t.chq} REFER TO DRAWER`,t.cr,0,t.chq);}
+  if(!isCur){add(end,'SMS ALERT CHARGES',250,0);add(end,'SERVICE CHARGES',1500,0);}
+  list.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+  const past=isCur?list.filter(t=>t.date<=asOf):list;if(isCur)future.push(...list.filter(t=>t.date>asOf));
+  if(!past.length)return;
+  const opening=bal;past.forEach(t=>{bal=round2(bal+t.cr-t.dr);t.bal=bal;});
+  if(!isCur){const intr=Math.round(Math.max(0,-bal)*0.011);bal=round2(bal-intr);past.push({date:mk+'-'+pad(end),desc:'OD INTEREST',dr:intr,cr:0,chq:'',bal});}
+  const stId='demo-st-'+mk,to=isCur?asOf:monthEnd(mk);
+  stmts.push({id:stId,acc:acc.id,file:isCur?`${monthLabel(mk)} statement to ${dmy(to)} (demo).pdf`:`${monthLabel(mk)} statement (demo).pdf`,fileId:null,kind:'pdf',from:mk+'-01',to,opening,closing:bal,cr:round2(sum(past,t=>t.cr)),dr:round2(sum(past,t=>t.dr)),count:past.length,imported:past.length,dups:0,uploaded:now.toISOString(),recon:0,status:'Imported',map:null,hIdx:null});
+  lists.push([stId,past]);
+ });
+ // Rest of this month (not yet in the bank) becomes commitments; supplier cheques already written = issued cheques.
+ const party=t=>{const c=cust.find(([k])=>t.desc.includes(k))||sup.find(([k])=>t.desc.includes(k));return c?c[1]:t.desc.replace(/\s+\d+.*$/,'');};
+ const plans=future.map((t,i)=>({id:'demo-f'+i,acc:acc.id,kind:t.cr?(t.chq?'CHQ_IN':'COLLECTION'):(/^CHQ \d/.test(t.desc)?'CHQ_OUT':'EXPENSE'),date:t.date,amount:t.cr||t.dr,party:party(t),flexible:false,chq:t.chq,note:'',status:'open',created:0}));
+ // Next month: collections early, salary on the 25th, issued cheques, and flexible supplier payments.
+ const L=monthEnd(curM),P=(o,kind,amount,party,flexible=false,chq='')=>({id:'demo-p'+o+kind+amount,acc:acc.id,kind,date:addDays(L,o),amount,party,flexible,chq,note:'',status:'open',created:0});
+ plans.push({id:'demo-late',acc:acc.id,kind:'COLLECTION',date:addDays(asOf,-4),amount:450000,party:'Lanka Sathosa',flexible:false,chq:'',note:'Promised last week',status:'open',created:0},
+  P(2,'COLLECTION',1200000,'Keells Super'),P(3,'COLLECTION',900000,'Cargills Food City'),P(4,'CHQ_IN',1500000,'Keells Super',false,'610001'),P(5,'COLLECTION',1100000,'Arpico Supercentre'),P(6,'COLLECTION',700000,'Laugfs Super'),P(7,'CHQ_IN',1200000,'Arpico Supercentre',false,'610002'),P(8,'COLLECTION',800000,'Lanka Sathosa'),P(9,'COLLECTION',600000,'Glomark'),
+  P(10,'COLLECTION',1000000,'Keells Super'),P(11,'COLLECTION',800000,'Laugfs Super'),P(13,'COLLECTION',500000,'Keells Super'),P(14,'COLLECTION',900000,'Arpico Supercentre'),P(16,'COLLECTION',700000,'Lanka Sathosa'),P(18,'COLLECTION',600000,'Cargills Food City'),P(19,'COLLECTION',600000,'Glomark'),P(22,'COLLECTION',800000,'Keells Super'),
+  P(5,'EXPENSE',350000,'Rent – stores'),P(15,'EXPENSE',720000,'CEB'),P(25,'EXPENSE',4300000,'Salaries'),P(25,'EXPENSE',560000,'EPF / ETF'),
+  P(20,'CHQ_OUT',1800000,'Prima Ceylon',false,'345920'),P(27,'CHQ_OUT',1600000,'CIC Holdings',false,'345921'),
+  P(24,'SUPPLIER',2200000,'Serendib Flour Mills',true),P(26,'SUPPLIER',1500000,'DPL Packaging',true),P(28,'SUPPLIER',2600000,'Prima Ceylon',true),P(29,'SUPPLIER',1200000,'Serendib Flour Mills',true),
+  P(33,'COLLECTION',1300000,'Keells Super'),P(34,'CHQ_IN',1400000,'Arpico Supercentre',false,'610003'),P(35,'COLLECTION',1000000,'Cargills Food City'),P(36,'COLLECTION',900000,'Laugfs Super'));
+ return{acc,rules,stmts,lists,plans};
+}
+ACT.demo=async()=>{
+ if(S.accounts.some(a=>a.id==='demo-acc'))return toast('Demo data is already loaded.');
+ if(S.txns.length&&!confirm('Demo data will be added as a separate DEMO account next to your data. Continue?'))return;
+ const D=buildDemo(new Date());
+ await DB.putMany('rules',D.rules);S.rules.push(...D.rules);
+ const txns=[];D.lists.forEach(([stId,list])=>list.forEach((t,i)=>{const c=classify(t);txns.push({id:stId+'-'+i,acc:D.acc.id,stmt:stId,date:t.date,desc:t.desc,dr:t.dr,cr:t.cr,bal:t.bal,chq:t.chq,ref:'',seq:i,cat:c.cat,party:c.party,src:c.src,key:txKey(D.acc.id,t)});}));
+ await DB.put('accounts',D.acc);await DB.putMany('statements',D.stmts);await DB.putMany('txns',txns);await DB.putMany('plans',D.plans);
+ S.accounts.push(D.acc);S.statements.push(...D.stmts);S.txns.push(...txns);S.plans.push(...D.plans);derive();
+ toast('Demo loaded: 6 months of statements, this month to date, and upcoming commitments.',4500);location.hash='#dash';render();
+};
+
+/* ---- Events & start ---- */
+CHG.accSel=el=>{S.ui.acc=el.value;render();};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-act]');if(!b||b.disabled)return;e.preventDefault();Promise.resolve(ACT[b.dataset.act]?.(b)).catch(err=>{console.error(err);toast(err.message||String(err),6000);});});
+document.addEventListener('change',e=>{if(e.target.id==='pk'){const f=$('#pf');if(f)f.checked=PLAN_KINDS[e.target.value].flex;}
+ const b=e.target.closest('[data-chg]');if(!b)return;Promise.resolve(CHG[b.dataset.chg]?.(b,e)).catch(err=>{console.error(err);toast(err.message||String(err),6000);});});
+window.addEventListener('hashchange',route);
+(async()=>{
+ try{await IDB.open();}catch(e){console.warn('IndexedDB unavailable, using memory',e);DB=MemDB;MEMORY_ONLY=true;}
+ if(window.Chart){const c=getComputedStyle(document.documentElement);Chart.defaults.color=c.getPropertyValue('--mut').trim()||'#667085';Chart.defaults.borderColor=c.getPropertyValue('--line').trim()||'#e4e8ee';Chart.defaults.font.family='system-ui,-apple-system,Segoe UI,Roboto,sans-serif';}
+ await loadAll();route();
+})();
+</script>
+</body>
+</html>
