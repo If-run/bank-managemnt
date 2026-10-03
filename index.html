@@ -132,29 +132,38 @@ const PLAN_KINDS={
 
 // Built-in keyword rules, checked in this order AFTER the user's own rules.
 // d: in = money in only, out = money out only, any = both.
+const RULES_VER=2; // bump when the built-in rules change; older copies are replaced on load
+const RET_WORDS='RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER,BOUNCED,BOUNCE';
 const DEFAULT_RULES=[
- {w:'RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER',d:'out',c:'Returned Cheque'},
- {w:'RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER',d:'in',c:'Outgoing Cheque'},
- {w:'OWN ACCOUNT,OWN A/C,INTERNAL TRANSFER,INTER ACCOUNT,SWEEP',d:'any',c:'Internal Transfer'},
+ {w:RET_WORDS,d:'out',c:'Returned Cheque'},
+ {w:RET_WORDS,d:'in',c:'Outgoing Cheque'},
+ {w:'OWN ACCOUNT,OWN A/C,INTERNAL TRANSFER,INTER ACCOUNT,SWEEP,CONTRA',d:'any',c:'Internal Transfer'},
  {w:'LOAN,TERM LOAN,LEASE',d:'any',c:'Loan'},
+ // Company ERP / ledger narrations (ALLI format: TRADE RECEIVABLE, CREDITOR GRN-, OTHER PAYABLE …)
+ {w:'TRADE RECEIVABLE,TRADE RECEIVABLES,DEBTOR,DEBTORS,CUSTOMER RECEIPT,INVOICE PAYMENT,CUSTOMER ADVANCES',d:'in',c:'Customer Collection'},
+ {w:'CREDITOR,CREDITORS,GRN,SUPPLIER PAYMENT',d:'out',c:'Supplier Payment'},
+ {w:'PRODUCTION EXPENSES,RAW MATERIAL,RAW MATERIALS,PURCHASE,PURCHASES',d:'out',c:'Purchase Payment'},
  {w:'SALARY,SALARIES,PAYROLL,EPF,ETF,WAGES',d:'out',c:'Salary'},
  {w:'CEB,LECO,ELECTRICITY',d:'out',c:'Electricity'},
  {w:'FUEL,CEYPETCO,LIOC,FILLING,PETROL,DIESEL',d:'out',c:'Fuel'},
  {w:'RENT',d:'out',c:'Rent'},
  {w:'OD INTEREST,OD INT,DEBIT INTEREST,INTEREST',d:'out',c:'OD Interest'},
- {w:'CHARGE,CHARGES,COMMISSION,FEE,FEES,STAMP DUTY,SMS ALERT,DEBIT TAX',d:'out',c:'Bank Charges'},
+ {w:'CHARGE,CHARGES,CHGS,CHG,COMMISSION,FEE,FEES,STAMP DUTY,SMS ALERT,DEBIT TAX',d:'out',c:'Bank Charges'},
  {w:'REPAIR,REPAIRS,MAINTENANCE',d:'out',c:'Maintenance'},
  {w:'ADVERT,ADVERTISING,MARKETING,PROMOTION',d:'out',c:'Marketing'},
  {w:'TRANSPORT,LORRY,FREIGHT,COURIER,HIRE',d:'out',c:'Transport'},
+ {w:'OTHER PAYABLE,OTHER PAYABLES,ACCRUED EXPENSES,ACCRUED BILL,VAT CONTROL,VAT,TAX PAYMENT',d:'out',c:'Other Expenses'},
  {w:'INTEREST',d:'in',c:'Other Income'},
  {w:'CASH DEP,CASH DEPOSIT,CDM',d:'in',c:'Sales Collection'},
- {w:'CHQ,CHEQUE,CLEARING,CLG,CHK',d:'in',c:'Incoming Cheque'},
+ {w:'CHQ,CHEQUE,CLEARING,CLG,CHK,REALIZED,REALISED',d:'in',c:'Incoming Cheque'},
  {w:'CHQ,CHEQUE,CLEARING,CLG,CHK',d:'out',c:'Outgoing Cheque'},
  {w:'CEFT,SLIPS,TRANSFER,TRF,FUND TRANSFER,LANKAPAY,RTGS,IBT',d:'in',c:'Bank Transfer In'},
  {w:'CEFT,SLIPS,TRANSFER,TRF,FUND TRANSFER,LANKAPAY,RTGS,IBT',d:'out',c:'Bank Transfer Out'}];
 
-const DEFAULT_SETTINGS={id:'main',org:'',fyStart:4,dateOrder:'AUTO',highlight:15,horizon:60,baseline:false,mappings:{}};
-const RET_RX=/\b(RETURN|RETURNED|RTN|UNPAID|DISHONOU?RED|REFER TO DRAWER)\b/i;
+const DEFAULT_SETTINGS={id:'main',org:'',fyStart:4,dateOrder:'AUTO',highlight:15,horizon:60,baseline:false,mappings:{},chqMappings:{},
+ // cheque & OD planning
+ clearDays:1,presentDays:1,bankDays:[1,2,3,4,5],holidays:'',bufferPct:5,odRate:0,staleMonths:6,rulesVer:0};
+const RET_RX=/\b(RETURN|RETURNED|RTN|UNPAID|DISHONOU?RED|REFER TO DRAWER|BOUNCED?)\b/i;
 const COLORS={pri:'#1f6fd1',ok:'#16a34a',bad:'#dc2626',warn:'#d97706',pur:'#7c3aed',grey:'#94a3b8',teal:'#0d9488',pink:'#db2777'};
 const PALETTE=['#1f6fd1','#16a34a','#d97706','#7c3aed','#dc2626','#0d9488','#db2777','#64748b','#ca8a04','#2563eb','#9333ea','#059669'];
 
@@ -273,14 +282,24 @@ function validateMap(rows,hIdx,map){
  return m;
 }
 
+const PDF_FOOT_RX=/©|all rights reserved|\bpage\s+\d+\s*(of|\/)\s*\d+|^page\s+\d+$|(computer|system)[- ]generated|printed (on|by)|generated (on|by)/i;
+/** Splits line gaps into "inside one transaction" and "between transactions" (1-D two-group split). */
+function gapThreshold(g){
+ if(g.length<6)return Infinity;const s=[...g].sort((a,b)=>a-b),n=s.length;const P=[0],Q=[0];s.forEach(v=>{P.push(P[P.length-1]+v);Q.push(Q[Q.length-1]+v*v);});
+ const sse=(a,b)=>{const c=b-a,m=(P[b]-P[a])/c;return Q[b]-Q[a]-c*m*m;};let best=null;
+ for(let k=1;k<n;k++){if(s[k]-s[k-1]<0.5)continue;const e=sse(0,k)+sse(k,n);if(!best||e<best.e)best={e,k};}
+ if(!best)return Infinity;const lo=s.slice(0,best.k),hi=s.slice(best.k);
+ if(hi.length<2||sum(hi)/hi.length<1.4*sum(lo)/lo.length)return Infinity;return(s[best.k-1]+s[best.k])/2;
+}
 async function readPdf(buf){
  if(!window.pdfjsLib)throw new Error('The PDF reader did not load. Check the internet connection and reload the page.');
  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
+ const PUA=/[-]/g; // icon glyphs some ERPs print inside the page (they stick to numbers otherwise)
  const lines=[];let chars=0;
  for(let p=1;p<=pdf.numPages;p++){
   const page=await pdf.getPage(p);const tc=await page.getTextContent();
-  const items=tc.items.filter(it=>it.str&&it.str.trim()).map(it=>({s:it.str.trim(),x:it.transform[4],y:it.transform[5],w:it.width||it.str.length*4}));
+  const items=tc.items.map(it=>({s:String(it.str||'').replace(PUA,'').trim(),x:it.transform[4],y:it.transform[5],w:it.width||String(it.str||'').length*4})).filter(it=>it.s);
   chars+=sum(items,i=>i.s.length);
   const pl=[];
   for(const it of items.sort((a,b)=>b.y-a.y)){let L=pl.find(l=>Math.abs(l.y-it.y)<3);if(!L){L={y:it.y,items:[]};pl.push(L);}L.items.push(it);}
@@ -288,22 +307,51 @@ async function readPdf(buf){
   for(const L of pl){L.items.sort((a,b)=>a.x-b.x);const cells=[];
    for(const it of L.items){const last=cells[cells.length-1];
     if(last&&it.x-last.x2<4){last.s+=(it.x-last.x2>0.8?' ':'')+it.s;last.x2=Math.max(last.x2,it.x+it.w);}else cells.push({s:it.s,x:it.x,x2:it.x+it.w});}
-   lines.push({page:p,cells});}
+   lines.push({page:p,y:L.y,cells});}
  }
- if(chars<60)throw new Error('This PDF has no readable text — it is probably a scanned image. Download the statement as CSV/Excel (or a normal PDF) from online banking.');
+ if(chars<60)throw new Error('This PDF has no readable text — it is probably a scanned image. Export it from the ERP / online banking as PDF, Excel or CSV instead of scanning.');
  const rowsRaw=lines.map(l=>l.cells.map(c=>c.s));
  const h=detectHeader(rowsRaw);
  if(!h)return{rows:rowsRaw,preText:rowsRaw.slice(0,20).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:false};
- // Align every text piece to the nearest header column (by overlap, numbers by right edge).
- const H=lines[h.idx].cells;const hdrText=H.map(c=>c.s).join('|');const rows=[H.map(c=>c.s)];
- for(let i=h.idx+1;i<lines.length;i++){
-  const L=lines[i];if(L.cells.map(c=>c.s).join('|')===hdrText)continue;
-  const row=H.map(()=>'');
-  for(const c of L.cells){const num=isAmountText(c.s);let bj=0,bd=Infinity;
-   H.forEach((hc,j)=>{const ov=Math.min(c.x2,hc.x2)-Math.max(c.x,hc.x);const d=ov>0?-ov:(num?Math.abs(c.x2-hc.x2):Math.abs(c.x-hc.x));if(d<bd){bd=d;bj=j;}});
-   row[bj]=row[bj]?row[bj]+' '+c.s:c.s;}
-  rows.push(row);
+ const H=lines[h.idx].cells;const sig=l=>l.cells.map(c=>c.s).join('|');const hdrText=sig(lines[h.idx]);
+ // Every text piece goes to the nearest header column (overlap for text, right edge for numbers).
+ const align=cells=>{const row=H.map(()=>'');for(const c of cells){const num=isAmountText(c.s);let bj=0,bd=Infinity;
+  H.forEach((hc,j)=>{const ov=Math.min(c.x2,hc.x2)-Math.max(c.x,hc.x);const d=ov>0?-ov:(num?Math.abs(c.x2-hc.x2):Math.abs(c.x-hc.x));if(d<bd){bd=d;bj=j;}});
+  row[bj]=row[bj]?row[bj]+' '+c.s:c.s;}return row;};
+ const hdrY={};lines.forEach((l,i)=>{if(i>=h.idx&&sig(l)===hdrText&&hdrY[l.page]==null)hdrY[l.page]=l.y;});
+ const dateCol=h.map.date;const amtCols=['dr','cr','amt','bal'].map(k=>h.map[k]).filter(v=>v!=null);
+ const L2=[];
+ for(let i=h.idx+1;i<lines.length;i++){const L=lines[i];
+  if(sig(L)===hdrText)continue;                                  // header repeated on each page
+  if(hdrY[L.page]!=null&&L.y>hdrY[L.page]+1)continue;              // page titles above that page's header
+  if(PDF_FOOT_RX.test(L.cells.map(c=>c.s).join(' ')))continue;     // footers
+  const row=align(L.cells);const dv=row[dateCol];
+  const isA=!!(parseDate(dv,'DMY')||parseDate(dv,'MDY'));
+  L2.push({page:L.page,y:L.y,row,k:isA?'A':amtCols.some(j=>isAmountText(row[j]))?'O':'F'});
  }
+ // A date line and its amounts printed a few points apart are one line.
+ for(let i=0;i<L2.length-1;i++){const a=L2[i],b=L2[i+1];if(a.page!==b.page||Math.abs(a.y-b.y)>5)continue;
+  const has=x=>amtCols.some(j=>isAmountText(x.row[j]));
+  if((a.k==='A'&&!has(a)&&b.k==='O')||(b.k==='A'&&!has(b)&&a.k==='O')){const A=a.k==='A'?a:b,O=A===a?b:a;A.row=A.row.map((v,j)=>v||O.row[j]);L2.splice(L2.indexOf(O),1);i--;}}
+ // Wrapped descriptions: text-only lines (F) belong to the nearest dated line (A) in the same block.
+ const gaps=[];for(let i=1;i<L2.length;i++)if(L2[i].page===L2[i-1].page){const g=L2[i-1].y-L2[i].y;if(g>0&&g<80)gaps.push(g);}
+ const TH=gapThreshold(gaps);const owner=new Map();let cl=[],lastA=null;
+ const flush=()=>{if(!cl.length)return;const as=cl.filter(x=>x.k==='A');
+  for(const x of cl){if(x.k!=='F')continue;let o=lastA;
+   if(as.length)o=as.reduce((b,a)=>{const d=Math.abs(a.y-x.y),bd=Math.abs(b.y-x.y);return d<bd-0.5||(Math.abs(d-bd)<=0.5&&a.y>b.y)?a:b;});
+   if(o)owner.set(x,o);}
+  if(as.length)lastA=as[as.length-1];cl=[];};
+ for(let i=0;i<L2.length;i++){const x=L2[i],pv=L2[i-1];
+  if(x.k==='O'){flush();continue;}
+  if(pv&&(pv.page!==x.page||pv.y-x.y>TH||pv.k==='O'))flush();
+  cl.push(x);}
+ flush();
+ const parts=new Map();for(const[f,a]of owner){if(!parts.has(a))parts.set(a,[]);parts.get(a).push(f);}
+ const keep=new Set([dateCol,...amtCols]);const rows=[H.map(c=>c.s)];
+ for(const x of L2){if(x.k==='F'&&owner.has(x))continue;
+  if(x.k==='A'&&parts.has(x)){const all=[x,...parts.get(x)].sort((a,b)=>a.page-b.page||b.y-a.y);
+   rows.push(x.row.map((v,j)=>keep.has(j)?v:all.map(l=>l.row[j]).filter(Boolean).join(' ').replace(/\s+/g,' ').trim()));}
+  else rows.push(x.row);}
  return{rows,preText:rowsRaw.slice(0,h.idx+1).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:true};
 }
 function readSheet(name,buf){
@@ -319,13 +367,15 @@ function readSheet(name,buf){
 function lastNum(r){for(let j=r.length-1;j>=0;j--){const v=parseAmount(r[j]);if(v!==null&&/\d/.test(String(r[j])))return v;}return null;}
 const OPEN_RX=/opening balance|balance b\/?f|brought forward|\bb\/f\b|balance brought|previous balance|beginning balance|balance forward/;
 const CLOSE_RX=/closing balance|balance c\/?f|carried forward|\bc\/f\b|ending balance/;
+const TOTAL_RX=/\btotals?\b|period movement|net movement|net (in|out)flow|sub-?total|turnover/i;
+const EMPTY_RX=/^[-–—.]+$/;
 
 /** Turns aligned rows into transactions. Nothing is dropped silently: problems go to `issues`. */
 function extract(rows,hIdx,map,orderPref){
  const get=(r,f)=>map[f]!=null&&map[f]!==''?(r[map[f]]??''):'';
  const order=detectOrder(rows.slice(hIdx+1,hIdx+400).map(r=>get(r,'date')),orderPref);
  const hdrSig=hIdx>=0?rows[hIdx].map(String).join('|'):null;
- const out=[],issues=[];let opening=null,closing=null;
+ const out=[],issues=[];let opening=null,closing=null,ctl=null;
  for(let i=hIdx+1;i<rows.length;i++){
   const r=rows[i]||[];if(!r.some(c=>String(c).trim()))continue;
   if(hdrSig&&r.map(String).join('|')===hdrSig)continue;
@@ -338,25 +388,27 @@ function extract(rows,hIdx,map,orderPref){
   let dr=0,cr=0,bad=false;
   if(map.dr!=null||map.cr!=null){
    const rd=get(r,'dr'),rc=get(r,'cr');const a=parseAmount(rd),b=parseAmount(rc);
-   if(String(rd).trim()&&a===null&&!/^[-–]+$/.test(String(rd).trim()))bad=true;if(String(rc).trim()&&b===null&&!/^[-–]+$/.test(String(rc).trim()))bad=true;
+   if(String(rd).trim()&&a===null&&!EMPTY_RX.test(String(rd).trim()))bad=true;if(String(rc).trim()&&b===null&&!EMPTY_RX.test(String(rc).trim()))bad=true;
    dr=a?Math.abs(a):0;cr=b?Math.abs(b):0;
   }else if(map.amt!=null){
-   const raw=get(r,'amt');const a=parseAmount(raw);if(String(raw).trim()&&a===null)bad=true;
+   const raw=get(r,'amt');const a=parseAmount(raw);if(String(raw).trim()&&a===null&&!EMPTY_RX.test(String(raw).trim()))bad=true;
    if(a!=null){const f=String(get(r,'drcr')).toUpperCase().trim();
     if(/^(DR|D|DEBIT)\b/.test(f))dr=Math.abs(a);else if(/^(CR|C|CREDIT)\b/.test(f))cr=Math.abs(a);else if(a<0)dr=-a;else cr=a;}
   }
   if(!d){
+   if(TOTAL_RX.test(all)){if(dr&&cr&&!ctl)ctl={dr:round2(dr),cr:round2(cr)};continue;} // printed control totals
    if(!dr&&!cr){if(desc&&out.length&&balV==null)out[out.length-1].desc+=' '+desc;continue;}
    issues.push({row:i+1,msg:'Amount found but the date is missing or unreadable',text:r.join(' | ')});continue;
   }
   if(bad)issues.push({row:i+1,msg:'Amount could not be read',text:r.join(' | ')});
   if(!dr&&!cr)continue;
   if(dr&&cr)issues.push({row:i+1,msg:'Row has both a debit and a credit',text:desc});
-  let chq=digits(get(r,'chq'));
+  let chq=digits(get(r,'chq'));const ref=String(get(r,'ref')??'').trim();
   if(!chq){const m=desc.toUpperCase().match(/\b(?:CHQ|CHEQUE|CHK|CHECK)\b[^0-9]{0,12}(\d{5,8})\b/);if(m)chq=m[1];}
-  out.push({date:d,desc,dr:round2(dr),cr:round2(cr),bal:balV,chq,ref:String(get(r,'ref')??'').trim(),row:i+1});
+  if(!chq&&/^\d{6,8}$/.test(ref)&&/CHQ|CHEQUE|CHECK|CHK/i.test(desc))chq=ref; // ERP: cheque number kept in Reference
+  out.push({date:d,desc,dr:round2(dr),cr:round2(cr),bal:balV,chq,ref,row:i+1});
  }
- return{out,opening,closing,issues,order};
+ return{out,opening,closing,issues,order,ctl};
 }
 function detectPeriod(text,order){
  const D='(\\d{1,2}[\\/\\-.]\\d{1,2}[\\/\\-.]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}[ \\-][A-Za-z]{3,9}[ \\-,]+\\d{2,4})';
@@ -364,19 +416,36 @@ function detectPeriod(text,order){
  if(!m)return null;const a=parseDate(m[1],order),b=parseDate(m[2],order);
  return a&&b&&a<=b?{from:a,to:b}:null;
 }
-function detectAccNo(text){const m=String(text).match(/(?:a\/c|acc(?:oun)?t?)\s*(?:no|number|#)?\.?\s*[:\-]?\s*([0-9][0-9\- ]{5,22}[0-9])/i);return m?digits(m[1]):'';}
+function detectAccNo(text){const m=String(text).match(/(?:a\/c|acc(?:oun)?t?)\s*(?:no|number|#)?\.?\s*[:\-]?\s*([0-9][0-9\- ]{5,22}[0-9])/i);if(m)return digits(m[1]);
+ const m2=String(text).match(/(?:^|[^\d])(\d{10,16})(?!\d)/);return m2?m2[1]:'';}
 function guessBank(text){const B=[['commercial bank','Commercial Bank'],['hatton national','HNB'],['hnb','HNB'],['sampath','Sampath Bank'],['bank of ceylon','Bank of Ceylon'],['boc','Bank of Ceylon'],["people's bank",'People\'s Bank'],['peoples bank','People\'s Bank'],['seylan','Seylan Bank'],['ndb','NDB'],['dfcc','DFCC'],['nations trust','Nations Trust Bank'],['pan asia','Pan Asia Bank'],['union bank','Union Bank'],['amana','Amana Bank'],['cargills bank','Cargills Bank'],['hsbc','HSBC'],['standard chartered','Standard Chartered']];const t=String(text).toLowerCase();const f=B.find(([k])=>t.includes(k));return f?f[1]:'';}
 
-/** Orders rows, fixes balance signs, checks running balance and reconciliation. */
-function finalize(ex,preText){
- let{out,opening,closing}=ex;out=out.map(t=>({...t}));const notes=[];
+/** Orders rows, works out the layout (bank statement or company ledger), checks balances and totals.
+ *  orient: 'auto' | 'bank' (Debit = money out) | 'ledger' (Debit = money in, e.g. ERP bank ledger / cash book). */
+const LEDGER_RX=/ledger|cash ?book|current assets?|general ledger|\bgl\b|trial balance/i;
+function finalize(ex,preText,orient='auto'){
+ let{out,opening,closing}=ex;out=out.map(t=>({...t}));const notes=[];const issues=[...ex.issues];
  if(out.length>2){let asc=0,desc=0;for(let i=1;i<out.length;i++){if(out[i].date>out[i-1].date)asc++;else if(out[i].date<out[i-1].date)desc++;}
-  if(desc>asc){out.reverse();notes.push('The statement was listed newest-first; it has been put in date order.');}}
- const hasBal=out.some(t=>t.bal!=null);
- if(hasBal){let norm=0,flip=0;
-  for(let i=1;i<out.length;i++){const a=out[i-1].bal,b=out[i].bal;if(a==null||b==null)continue;const e=out[i].cr-out[i].dr;if(Math.abs(b-a-e)<0.51)norm++;else if(Math.abs(b-a+e)<0.51)flip++;}
-  if(flip>norm){out.forEach(t=>{if(t.bal!=null)t.bal=-t.bal;});if(opening!=null)opening=-opening;if(closing!=null)closing=-closing;
-   notes.push('This bank prints overdraft balances as positive numbers. They were converted to negative (overdrawn) so the OD figures are correct.');}}
+  if(desc>asc){out.reverse();notes.push('The file was listed newest-first; it has been put in date order.');}}
+ const rawDr=round2(sum(out,t=>t.dr)),rawCr=round2(sum(out,t=>t.cr));
+ const hasBal=out.some(t=>t.bal!=null);let norm=0,flip=0;
+ if(hasBal)for(let i=1;i<out.length;i++){const a=out[i-1].bal,b=out[i].bal;if(a==null||b==null)continue;const e=out[i].cr-out[i].dr;if(Math.abs(b-a-e)<0.51)norm++;else if(Math.abs(b-a+e)<0.51)flip++;}
+ const signed=(opening!=null&&opening<0)||(closing!=null&&closing<0)||out.some(t=>t.bal!=null&&t.bal<0);
+ let swap=false,negBal=false;
+ if(orient==='ledger')swap=true;
+ else if(orient==='auto'){
+  // Both readings balance, so decide from evidence: ledger words in the heading, then how balances are signed.
+  if(hasBal&&flip>norm){const bl=out.filter(t=>t.bal!=null),negShare=bl.filter(t=>t.bal<0).length/bl.length;
+   if(LEDGER_RX.test(preText)||(signed&&negShare>0.5))swap=true;else negBal=true;}
+  else if(!hasBal&&LEDGER_RX.test(preText))swap=true;}
+ else if(orient==='bank'&&hasBal&&flip>norm)negBal=true;
+ if(swap){out.forEach(t=>{const x=t.dr;t.dr=t.cr;t.cr=x;});
+  notes.push('Company ledger layout (ERP bank account / cash book): the Debit column is money IN and the Credit column is money OUT — the opposite of a bank statement. Read accordingly. If this is wrong, change it under Map columns.');}
+ if(negBal){out.forEach(t=>{if(t.bal!=null)t.bal=-t.bal;});if(opening!=null)opening=-opening;if(closing!=null)closing=-closing;
+  notes.push('This bank prints overdraft balances as positive numbers. They were converted to negative (overdrawn) so the OD figures are correct.');}
+ if(ex.ctl){const ok=Math.abs(ex.ctl.dr-rawDr)<0.51&&Math.abs(ex.ctl.cr-rawCr)<0.51;
+  if(ok)notes.push(`Column totals match the totals printed in the file (Debit ${fmt(ex.ctl.dr,2)} · Credit ${fmt(ex.ctl.cr,2)}).`);
+  else issues.push({row:0,msg:`Column totals do not match the totals printed in the file — file: Debit ${fmt(ex.ctl.dr,2)} / Credit ${fmt(ex.ctl.cr,2)}; read: ${fmt(rawDr,2)} / ${fmt(rawCr,2)}`,text:''});}
  if(opening==null&&out.length&&out[0].bal!=null){opening=round2(out[0].bal-out[0].cr+out[0].dr);notes.push('Opening balance was not printed; it was calculated from the first transaction.');}
  const lastWithBal=[...out].reverse().find(t=>t.bal!=null);
  if(closing==null&&lastWithBal)closing=lastWithBal.bal;
@@ -388,7 +457,7 @@ function finalize(ex,preText){
  let from=dates[0]||null,to=dates[dates.length-1]||null;
  const per=detectPeriod(preText,ex.order);
  if(per&&from&&per.from<=from&&per.to>=to&&daysBetween(per.from,per.to)<=93){from=per.from;to=per.to;}
- return{out,opening,closing,cr,dr,recon,breaks,notes,from,to,hasBal,issues:ex.issues,order:ex.order};
+ return{out,opening,closing,cr,dr,recon,breaks,notes,from,to,hasBal,issues,order:ex.order,source:swap?'ledger':'bank'};
 }
 const normDesc=s=>String(s).toUpperCase().replace(/[^A-Z0-9]/g,'');
 const txKey=(acc,t)=>[acc,t.date,(+t.dr).toFixed(2),(+t.cr).toFixed(2),normDesc(t.desc).slice(0,40),t.chq||'',t.ref||'',t.bal!=null?(+t.bal).toFixed(2):''].join('|');
@@ -436,7 +505,12 @@ const S={accounts:[],statements:[],txns:[],rules:[],plans:[],settings:{...DEFAUL
 async function loadAll(){
  for(const k of['accounts','statements','txns','rules','plans'])S[k]=await DB.all(k);
  const st=(await DB.all('settings')).find(x=>x.id==='main');S.settings={...DEFAULT_SETTINGS,...(st||{})};S.settings.mappings=S.settings.mappings||{};
- if(!S.rules.some(r=>r.builtin)){const br=DEFAULT_RULES.map((r,i)=>({id:'b'+i,words:r.w,dir:r.d,cat:r.c,party:'',builtin:true,ord:i}));await DB.putMany('rules',br);S.rules.push(...br);}
+ if((S.settings.rulesVer||0)<RULES_VER||!S.rules.some(r=>r.builtin)){
+  const old=S.rules.filter(r=>r.builtin).map(r=>r.id);if(old.length)await DB.delMany('rules',old);S.rules=S.rules.filter(r=>!r.builtin);
+  const br=DEFAULT_RULES.map((r,i)=>({id:'b'+i,words:r.w,dir:r.d,cat:r.c,party:'',builtin:true,ord:i}));await DB.putMany('rules',br);S.rules.push(...br);
+  if(S.settings.rulesVer)await reapplyRules(false); // re-check items still in Needs review
+  S.settings.rulesVer=RULES_VER;await saveSettings();}
+ if(!Array.isArray(S.settings.bankDays))S.settings.bankDays=[1,2,3,4,5];
  derive();
 }
 const saveSettings=()=>DB.put('settings',S.settings);
@@ -547,18 +621,53 @@ function patterns(ids){
 }
 
 /* ---------- 8. FORECAST ---------- */
-function forecast(ids,{horizon=60,baseline=false}={}){
+/* ---- Working days & cheque timing (Sri Lanka CITS clearing: money is available 1 working day after deposit by default) ---- */
+let _hol={k:null,s:new Set()};
+function holidaySet(){const k=String(S.settings.holidays||'');if(_hol.k!==k)_hol={k,s:new Set(k.split(/[\s,;]+/).map(x=>parseDate(x,'DMY')).filter(Boolean))};return _hol.s;}
+const isWorkDay=d=>{const w=toD(d).getDay();return w!==0&&w!==6&&!holidaySet().has(d);};
+const nextWork=d=>{for(let i=0;i<60&&!isWorkDay(d);i++)d=addDays(d,1);return d;};
+const prevWork=d=>{for(let i=0;i<60&&!isWorkDay(d);i++)d=addDays(d,-1);return d;};
+const addWork=(d,n)=>{d=nextWork(d);for(let i=0;i<n;i++)d=nextWork(addDays(d,1));return d;};
+const subWork=(d,n)=>{for(let i=0;i<n;i++)d=prevWork(addDays(d,-1));return d;};
+const bankDayList=()=>Array.isArray(S.settings.bankDays)&&S.settings.bankDays.length?S.settings.bankDays:[1,2,3,4,5];
+const isBankDay=d=>isWorkDay(d)&&bankDayList().includes(toD(d).getDay());
+const nextBankDay=d=>{for(let i=0;i<60&&!isBankDay(d);i++)d=addDays(d,1);return d;};
+function staleCut(){const d=toD(todayIso());d.setMonth(d.getMonth()-(+S.settings.staleMonths||6));return iso(d);}
+const WD=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const dday=s=>s?WD[toD(s).getDay()]+' '+dmy(s):'–';
+/** When a cheque moves money.
+ *  Received: banked on the first bank-visit day on/after the cheque date (holding a due cheque never helps — it only keeps OD and interest higher), money available after the clearing days.
+ *  Issued: debited when the payee presents it — cheque date (or the agreed hold date) + presentation days. */
+function chqTiming(p,start){
+ const today=todayIso();
+ if(p.kind==='CHQ_IN'){const from=[p.date,start||today,today].sort()[2];const dep=p.depDate||nextBankDay(from);return{dep,eff:addWork(dep,+S.settings.clearDays||0)};}
+ const base=[p.date,p.holdTo||'',start||''].sort()[2];return{eff:addWork(base,+S.settings.presentDays||0)};
+}
+/** Customers who have had a cheque returned (from bank data or cheques marked returned). */
+function riskyParties(){const set=new Set(),byChq={};const n=x=>String(x||'').replace(/^0+/,'');
+ S.txns.forEach(t=>{if(t.chq&&t.cr>0&&!RET_RX.test(t.desc))byChq[n(t.chq)]=t;});
+ S.txns.filter(t=>t.cat==='Returned Cheque').forEach(t=>{const o=t.chq&&byChq[n(t.chq)];const pt=(o&&o.party)||t.party;if(pt)set.add(pt.toUpperCase());});
+ S.plans.filter(p=>p.status==='returned'&&p.party).forEach(p=>set.add(p.party.toUpperCase()));return set;}
+const isRisky=(p,set)=>!!(p.party&&set.has(p.party.toUpperCase()));
+function forecast(ids,{horizon=60,baseline=false,stress=false}={}){
  const asOf=latestC(ids);if(!asOf)return null;
  const start=addDays(asOf,1),end=addDays(start,horizon-1);
  const startBal=balC(ids,asOf)??0,limit=limitC(ids);
- const events=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)).map(p=>{const k=PLAN_KINDS[p.kind]||PLAN_KINDS.EXPENSE;
-  return{...p,amt:k.sign*p.amount,type:k.type,kindLabel:k.label,eff:p.date<start?start:p.date,late:p.date<start};})
+ const cut=staleCut(),risky=stress?riskyParties():null,excluded=[];
+ const events=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)).filter(p=>{
+   if(p.kind==='CHQ_IN'&&!p.depDate&&p.date<cut)return false;                       // stale — cannot be banked
+   if(risky&&p.kind==='CHQ_IN'&&isRisky(p,risky)){excluded.push(p);return false;}    // stress test
+   return true;})
+  .map(p=>{const k=PLAN_KINDS[p.kind]||PLAN_KINDS.EXPENSE;let eff,dep=null,late=p.date<start;
+   if(p.kind==='CHQ_IN'||p.kind==='CHQ_OUT'){const t=chqTiming(p,start);eff=t.eff<start?start:t.eff;dep=t.dep||null;late=false;}
+   else eff=p.date<start?start:p.date;
+   return{...p,amt:k.sign*p.amount,type:k.type,kindLabel:k.label,eff,dep,late};})
   .filter(e=>e.eff<=end).sort((a,b)=>a.eff<b.eff?-1:a.eff>b.eff?1:b.amt-a.amt);
  let base=0,baseInfo=null;
  if(baseline){const ms=monthsWithData(ids).filter(m=>monthEnd(m)<=asOf).slice(-3);
   if(ms.length){let inc=0,out=0,days=0;ms.forEach(m=>{const st=periodStats(ids,m+'-01',monthEnd(m));inc+=st.income;out+=st.out;days+=+monthEnd(m).slice(8);});base=(inc-out)/days;baseInfo={months:ms,perDay:base,total:base*horizon};}}
  const beyond=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&p.date>end).length;
- return{ids,asOf,start,end,horizon,startBal,limit,events,base,baseInfo,beyond,...project(events,startBal,start,end,limit,base)};
+ return{ids,asOf,start,end,horizon,startBal,limit,events,base,baseInfo,beyond,excluded,...project(events,startBal,start,end,limit,base)};
 }
 function project(events,startBal,start,end,limit,base){
  const byDay={};events.forEach(e=>(byDay[e.eff]||(byDay[e.eff]=[])).push(e));
@@ -589,6 +698,48 @@ function odAnalysis(f){
  const scenB=accel.length?project(mv(accel),f.startBal,f.start,f.end,f.limit,f.base):null;
  return{b,outs,before,after,flex,flexTotal,resched,newDate,scenA,accel,accelDate,scenB};
 }
+/** Cheque planner: step-by-step plan to bring projected OD back under (limit − safety buffer).
+ *  Order = what management controls most: 1) move flexible planned payments, 2) ask payees to present issued cheques later,
+ *  3) ask customers to pay earlier, 4) short-term funding for whatever is left. Options only — nothing changes until "Apply". */
+const exSum=(r,cap)=>sum(r.days,d=>Math.max(0,d.od-cap));
+function recoveryPlan(f){
+ if(!f||!f.limit)return null;
+ const cap=round2(f.limit*(1-(+S.settings.bufferPct||0)/100));
+ const P=ev=>project(ev,f.startBal,f.start,f.end,cap,f.base);
+ const better=(a,b)=>a.peakExcess<b.peakExcess-0.5||(Math.abs(a.peakExcess-b.peakExcess)<=0.5&&exSum(a,cap)<exSum(b,cap)-0.5);
+ const overDays=r=>r.days.filter(d=>d.od>cap+0.5);
+ let ev=f.events.map(e=>({...e}));let r=P(ev);const r0=r;const steps=[];const lastD=addDays(f.end,-7);
+ const moveOut=(list,stage)=>{for(const c0 of list){if(!r.breach)return;const o=overDays(r);const c=ev.find(e=>e.id===c0.id);if(!c||c.eff>o[o.length-1].date)continue;
+   let best=null;for(let D=nextWork(addDays(c.eff,1));D<=lastD;D=nextWork(addDays(D,1))){const e2=ev.map(e=>e.id===c.id?{...e,eff:D}:e);const r2=P(e2);if(!best||better(r2,best.r))best={D,r:r2,e2};if(r2.peakExcess<0.5)break;}
+   if(best&&better(best.r,r)){steps.push({stage,e:c,from:c.eff,to:best.D,before:r.peakExcess,after:best.r.peakExcess});ev=best.e2;r=best.r;}}};
+ const moveIn=(list,stage)=>{for(const c0 of list){if(!r.breach)return;const fo=r.breach.date;const c=ev.find(e=>e.id===c0.id);if(!c||c.eff<=fo||daysBetween(fo,c.eff)>30)continue;
+   let to=prevWork(addDays(fo,-1));if(to<f.start)to=f.start;if(to>=c.eff)continue;const e2=ev.map(e=>e.id===c.id?{...e,eff:to}:e);const r2=P(e2);
+   if(better(r2,r)){steps.push({stage,e:c,from:c.eff,to,before:r.peakExcess,after:r2.peakExcess});ev=e2;r=r2;}}};
+ if(r.breach){
+  moveOut(ev.filter(e=>e.amt<0&&e.flexible&&e.kind!=='CHQ_OUT').sort((a,b)=>a.amt-b.amt),'flex');
+  moveOut(ev.filter(e=>e.kind==='CHQ_OUT').sort((a,b)=>a.amt-b.amt),'hold');
+  moveIn(ev.filter(e=>e.amt>0&&(e.kind==='CHQ_IN'||e.kind==='COLLECTION')).sort((a,b)=>a.eff<b.eff?-1:a.eff>b.eff?1:b.amt-a.amt),'early');
+ }
+ const windows=[];let w=null;
+ for(const d of r.days){if(d.od>cap+0.5){if(!w)w={from:d.date,to:d.date,max:0,overLimit:0};w.to=d.date;w.max=Math.max(w.max,d.od-cap);w.overLimit=Math.max(w.overLimit,d.od-f.limit);}else if(w){windows.push(w);w=null;}}
+ if(w)windows.push(w);
+ return{cap,r0,steps,final:r,windows};
+}
+/** Earliest date a new issued cheque can hit the account without making the worst OD point any worse. */
+function safeDateFor(f,amount){
+ const cap=round2(f.limit*(1-(+S.settings.bufferPct||0)/100));const P=ev=>project(ev,f.startBal,f.start,f.end,cap,f.base);
+ const base=P(f.events),today=todayIso(),pd=+S.settings.presentDays||0;let best=null;
+ for(let D=nextWork(f.start>today?f.start:today);D<=addDays(f.end,-7);D=nextWork(addDays(D,1))){
+  const r=P([...f.events,{id:'_new',amt:-amount,eff:D}]);const inc=r.peakExcess-base.peakExcess;const cd=subWork(D,pd)<today?today:subWork(D,pd);
+  if(inc<0.5)return{debit:D,chqDate:cd,r,base,ok:r.peakExcess<0.5,cap};
+  if(!best||inc<best.inc)best={debit:D,chqDate:cd,r,inc};}
+ return{debit:null,best,base,cap};
+}
+function stepText(s){const e=s.e,who=esc(e.party||e.kindLabel),amt=rs(Math.abs(e.amt));
+ if(s.stage==='flex')return`Pay ${who} ${amt} on <b>${dday(s.to)}</b> instead of ${dday(s.from)}.`;
+ if(s.stage==='hold')return`Ask ${who} not to present cheque${e.chq?' #'+esc(e.chq):''} (${amt}, dated ${dmy(e.date)}) before <b>${dday(subWork(s.to,+S.settings.presentDays||0))}</b> — it then reaches the account ${dday(s.to)}.`;
+ return e.kind==='CHQ_IN'?`Ask ${who} to replace cheque${e.chq?' #'+esc(e.chq):''} dated ${dmy(e.date)} (${amt}) with a transfer or cash by <b>${dday(s.to)}</b>.`:`Ask ${who} to pay the ${amt} due ${dmy(e.date)} by <b>${dday(s.to)}</b>.`;}
+
 /** Section 16: prioritised items for management. */
 function actionItems(idsIn){
  const items=[];const ids=idsIn||allAccIds();
@@ -601,8 +752,8 @@ function actionItems(idsIn){
   if(f.breach){riskFound=true;const an=odAnalysis(f);
    const rsch=an.resched.slice(0,2).map(e=>`${esc(e.party||e.kindLabel)} ${rs(-e.amt)} (${dmy(e.eff)})`).join(' and ');
    items.push({p:'high',t:`OD limit breach projected on ${dmy(f.breach.date)} — ${esc(name)}`,
-    d:`Projected OD use exceeds the approved ${rs(f.limit)} by ${rs(f.breach.excess)}, peaking at ${rs(f.peakExcess)} over the limit on ${dmy(f.peakDate)}.`,
-    a:an.resched.length?`Review whether ${rsch}${an.resched.length>2?` and ${an.resched.length-2} other flexible payment${an.resched.length>3?'s':''}`:''} can be scheduled after ${dmy(an.newDate)}.${an.scenA&&!an.scenA.breach?' In the projection, moving the flexible payments removes the breach.':' Moving flexible payments alone does not remove the breach — also review collections and funding ('+rs(f.peakExcess)+' required).'}`:`No flexible payments are scheduled before the breach. Funding of ${rs(f.peakExcess)} or faster collections would be required.`,link:'#forecast'});
+    d:`Projected OD use exceeds the approved ${rs(f.limit)} by ${rs(f.breach.excess)}, peaking at ${rs(f.peakExcess)} over the limit on ${dmy(f.peakDate)}. The Cheque planner has a step-by-step recovery plan.`,
+    a:an.resched.length?`Review whether ${rsch}${an.resched.length>2?` and ${an.resched.length-2} other flexible payment${an.resched.length>3?'s':''}`:''} can be scheduled after ${dmy(an.newDate)}.${an.scenA&&!an.scenA.breach?' In the projection, moving the flexible payments removes the breach.':' Moving flexible payments alone does not remove the breach — also review collections and funding ('+rs(f.peakExcess)+' required).'}`:`No flexible payments are scheduled before the breach. Funding of ${rs(f.peakExcess)} or faster collections would be required.`,link:'#planner'});
   }else if(f.maxUtil!=null&&f.maxUtil>=0.85){riskFound=true;
    items.push({p:'att',t:`OD utilisation projected to reach ${pct(f.maxUtil)} on ${dmy(f.maxODDate)} — ${esc(name)}`,d:`Available headroom falls to ${rs(f.limit-f.maxOD)}.`,a:'Review upcoming non-critical payments and follow up the expected collections.',link:'#forecast'});}
   if(si===0&&f.limit){let n=0;
@@ -610,8 +761,16 @@ function actionItems(idsIn){
     const col=f.events.find(c=>c.amt>0&&c.eff>e.eff&&daysBetween(e.eff,c.eff)<=10&&c.amt>=-e.amt*0.5);const day=f.days.find(d=>d.date===e.eff);
     if(col&&day&&day.od/f.limit>=0.8){n++;items.push({p:'high',t:`${esc(e.kindLabel)} of ${rs(-e.amt)}${e.party?' ('+esc(e.party)+')':''} is scheduled on ${dmy(e.eff)}, before an expected collection of ${rs(col.amt)} on ${dmy(col.eff)}`,d:`OD utilisation on ${dmy(e.eff)} is projected at ${pct(day.od/f.limit)}.`,a:`Review whether the payment can be scheduled after ${dmy(col.eff)}.`,link:'#plans'});}}}
  });
- const lateIn=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&PLAN_KINDS[p.kind].sign>0&&p.date<today).sort((a,b)=>a.date<b.date?-1:1);
+ const lateIn=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&PLAN_KINDS[p.kind].sign>0&&p.kind!=='CHQ_IN'&&p.date<today).sort((a,b)=>a.date<b.date?-1:1);
  if(lateIn.length)items.push({p:'att',t:`${lateIn.length} expected receipt${lateIn.length>1?'s':''} totalling ${rs(sum(lateIn,p=>p.amount))} ${lateIn.length>1?'are':'is'} overdue`,d:`Oldest: ${esc(lateIn[0].party||'—')} due ${dmy(lateIn[0].date)}. The forecast still counts ${lateIn.length>1?'them':'it'} as coming in.`,a:'Follow up these customers, or update the expected dates in Commitments.',link:'#plans'});
+ const cut=staleCut(),hand=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&p.kind==='CHQ_IN'&&!p.depDate);
+ const dueNow=hand.filter(p=>p.date<=today&&p.date>=cut).sort((a,b)=>a.date<b.date?-1:1);
+ if(dueNow.length){const nb=nextBankDay(today),tot=sum(dueNow,p=>p.amount),m=dueNow.length>1;const rate=+S.settings.odRate||0;
+  items.push({p:riskFound?'high':'att',t:`${dueNow.length} cheque${m?'s':''} in hand (${rs(tot)}) ${m?'are':'is'} already due but not deposited`,
+   d:`Oldest dated ${dmy(dueNow[0].date)}. Until ${m?'they are':'it is'} banked, this money is not reducing the OD.${rate?` Holding cost so far about ${rs(sum(dueNow,p=>p.amount*rate/100*daysBetween(p.date,today)/365))}.`:''}`,
+   a:`Deposit on ${dday(nb)} — money in the account ${dday(addWork(nb,+S.settings.clearDays||0))}.`,link:'#planner'});}
+ const stl=hand.filter(p=>p.date<cut);
+ if(stl.length)items.push({p:'att',t:`${stl.length} cheque${stl.length>1?'s':''} in hand (${rs(sum(stl,p=>p.amount))}) ${stl.length>1?'are':'is'} stale`,d:`Dated more than ${S.settings.staleMonths} months ago — the bank will not accept ${stl.length>1?'them':'it'}.`,a:'Ask the customers for replacement cheques or payment.',link:'#planner'});
  const asOf=latestC(ids);if(asOf&&daysBetween(asOf,today)>35)items.push({p:'att',t:`Bank data is ${daysBetween(asOf,today)} days old`,d:`Latest statement ends ${dmy(asOf)}. The forecast starts from that date.`,a:'Upload the latest monthly statement.',link:'#upload'});
  const nr=S.txns.filter(t=>ids.includes(t.acc)&&t.cat==='Needs Review');
  if(nr.length)items.push({p:'att',t:`${nr.length} transaction${nr.length>1?'s':''} need${nr.length>1?'':'s'} a category`,d:`${rs(sum(nr,t=>t.cr+t.dr))} is not yet in the income/expense analysis.`,a:'Classify them once — the system remembers the keyword for next month.',link:'#review'});
@@ -642,7 +801,7 @@ const csvCell=v=>{const s=String(v??'');return/[",\n]/.test(s)?'"'+s.replace(/"/
 function txCsv(list){const h=['Account','Date','Description','Cheque','Reference','Debit','Credit','Balance','Category','Group','Customer/Supplier','Data type'];
  return '﻿'+[h,...list.map(t=>[accName(t.acc),t.date,t.desc,t.chq,t.ref,t.dr||'',t.cr||'',t.rb??t.bal??'',t.cat,GROUP_LABEL[GROUP[t.cat]]||'',t.party,'ACTUAL'])].map(r=>r.map(csvCell).join(',')).join('\r\n');}
 
-const PAGES=[['dash','Dashboard'],['upload','Upload statement'],['review','Needs review'],['txns','Transactions'],['reports','Monthly report'],['plans','Commitments'],['forecast','Forecast & OD'],['actions','Action center'],['cheques','Cheques'],['history','Upload history'],['settings','Settings']];
+const PAGES=[['dash','Dashboard'],['upload','Upload statement'],['review','Needs review'],['txns','Transactions'],['reports','Monthly report'],['plans','Commitments'],['planner','Cheque planner'],['forecast','Forecast & OD'],['actions','Action center'],['cheques','Cheque register'],['history','Upload history'],['settings','Settings']];
 function renderNav(){const nr=S.txns.filter(t=>t.cat==='Needs Review').length;
  $('#nav').innerHTML=PAGES.map(([k,l])=>`<a href="#${k}" class="${S.ui.page===k?'on':''}">${l}${k==='review'&&nr?`<span class="cnt">${nr}</span>`:''}</a>`).join('');}
 function renderAccSel(){$('#accSel').innerHTML=`<option value="ALL">All accounts</option>`+S.accounts.map(a=>`<option value="${a.id}" ${S.ui.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('');
@@ -664,7 +823,7 @@ function trendChart(id,rows,h=280){return chartBox(id,{type:'bar',data:{labels:r
   {label:'Net cash flow',data:rows.map(r=>r.net),backgroundColor:COLORS.grey,order:2},
   {label:'Closing balance',data:rows.map(r=>r.closing),type:'line',borderColor:COLORS.pri,backgroundColor:COLORS.pri,tension:.25,order:1}]},
  options:{maintainAspectRatio:false,scales:{y:moneyAxis},plugins:{tooltip:tipMoney}}},h);}
-function forecastChart(id,ids,f,h=300){
+function forecastChart(id,ids,f,h=300,cap=null){
  const past=daily(ids,addDays(f.asOf,-29),f.asOf).filter(x=>x.known);
  const labels=[...past.map(x=>dm(x.date)),...f.days.map(x=>dm(x.date))];
  const act=[...past.map(x=>x.bal),...f.days.map(()=>null)];
@@ -672,6 +831,7 @@ function forecastChart(id,ids,f,h=300){
  const ds=[{label:'ACTUAL balance',data:act,borderColor:COLORS.ok,backgroundColor:COLORS.ok,pointRadius:0,tension:.2},
   {label:'FORECAST balance',data:fc,borderColor:COLORS.pri,backgroundColor:COLORS.pri,borderDash:[6,4],pointRadius:0,tension:.2}];
  if(f.limit)ds.push({label:'OD limit',data:labels.map(()=>-f.limit),borderColor:COLORS.bad,borderWidth:1.5,pointRadius:0,borderDash:[2,3]});
+ if(cap&&f.limit)ds.push({label:'Safe level (buffer)',data:labels.map(()=>-cap),borderColor:COLORS.warn,borderWidth:1.2,pointRadius:0,borderDash:[6,3]});
  return chartBox(id,{type:'line',data:{labels,datasets:ds},options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},scales:{y:moneyAxis,x:{ticks:{maxTicksLimit:12}}},plugins:{tooltip:tipMoney}}},h);}
 VIEWS.dash=()=>{
  if(!S.txns.length)return welcome();
@@ -690,6 +850,7 @@ VIEWS.dash=()=>{
  ${kpi('Net cash flow',rs(st.net),'ACTUAL','credits − debits',st.net<0)}
  ${kpi('Projected lowest balance',rs(f.min.bal),'FORECAST','on '+dmy(f.min.date),f.min.bal<0)}
  ${kpi('OD breach date',f.breach?dmy(f.breach.date):'None','FORECAST',f.breach?'over limit by '+rs(f.breach.excess):`next ${f.horizon} days`,!!f.breach)}
+ ${(()=>{const hand=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc)&&p.kind==='CHQ_IN'&&!p.depDate);const due=hand.filter(p=>p.date<=todayIso()&&p.date>=staleCut());return hand.length?kpi('Cheques in hand',rs(sum(hand,p=>p.amount)),'EXPECTED',`<a href="#planner">${due.length} due to deposit · ${rs(sum(due,p=>p.amount))}</a>`,false,due.length?'warn':''):'';})()}
  </div>
  <div class="card"><div class="row sb"><h2>What should management do?</h2><a href="#actions">Action center →</a></div>${acts.map(alertHtml).join('')}</div>
  <div class="g2"><div class="card"><h2>Last ${rows.length} months ${badge('ACTUAL')}</h2>${trendChart('dTrend',rows)}</div>
@@ -715,11 +876,13 @@ async function handleFile(file,replaceStmt){
   src.fileName=file.name;src.type=file.type||'';src.buf=buf;
   if(!src.rows.length)throw new Error('The file is empty.');
   const det=detectHeader(src.rows);let hIdx,map;
-  if(det){hIdx=det.idx;map=det.map;const saved=S.settings.mappings[headerSig(src.rows[hIdx])];if(saved)map={...saved};}
+  let orient='auto';
+  if(det){hIdx=det.idx;map=det.map;const saved=S.settings.mappings[headerSig(src.rows[hIdx])];if(saved){map={...(saved.map||saved)};orient=saved.orient||'auto';}}
   else{hIdx=-1;map=guessColumns(src.rows);}
+  if(replaceStmt&&replaceStmt.orient)orient=replaceStmt.orient;
   if(replaceStmt&&replaceStmt.map&&replaceStmt.hIdx!=null&&replaceStmt.hIdx<src.rows.length){hIdx=replaceStmt.hIdx;map={...replaceStmt.map};}
   map=validateMap(src.rows,hIdx,map);
-  IMP={src,hIdx,map,order:S.settings.dateOrder,showMap:!det||(isPdf&&!src.pdfAligned),saveMap:true,override:false,acc:replaceStmt?replaceStmt.acc:null,newAcc:null,replaceStmt:replaceStmt?replaceStmt.id:null,manualOpening:null};
+  IMP={src,hIdx,map,orient,order:S.settings.dateOrder,showMap:!det||(isPdf&&!src.pdfAligned),saveMap:true,override:false,acc:replaceStmt?replaceStmt.acc:null,newAcc:null,replaceStmt:replaceStmt?replaceStmt.id:null,manualOpening:null};
   recompute(true);
   if(location.hash!=='#upload')location.hash='#upload';else render();
   if(!IMP.fin.out.length)toast('No transactions were found automatically. Use “Map columns” to show which column is which.',7000);
@@ -727,7 +890,7 @@ async function handleFile(file,replaceStmt){
 }
 function recompute(first){
  const I=IMP;const ex=extract(I.src.rows,I.hIdx,I.map,I.order);
- I.fin=finalize(ex,I.src.preText+'\n'+I.src.fileName);
+ I.fin=finalize(ex,I.src.preText+'\n'+I.src.fileName,I.orient||'auto');
  if(I.manualOpening!=null&&I.fin.opening==null){I.fin.opening=I.manualOpening;if(!I.fin.hasBal)I.fin.closing=round2(I.manualOpening+I.fin.cr-I.fin.dr);}
  if(first&&I.acc==null){const text=I.src.preText+' '+I.src.fileName;const num=detectAccNo(text);I.detNo=num;
   const same=(a,b)=>a&&b&&(a===b||(a.length>=8&&b.length>=8&&(a.endsWith(b)||b.endsWith(a))));
@@ -757,7 +920,7 @@ function previewHtml(){
  const acctSel=`<select data-chg="impAcc">${S.accounts.map(a=>`<option value="${a.id}" ${I.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}<option value="NEW" ${I.acc==='NEW'?'selected':''}>+ New account…</option></select>`;
  let h=`<div class="card"><div class="row sb"><h2>Import preview ${badge('ACTUAL')}</h2><span class="muted small">Nothing is saved until you press Confirm import.</span></div>
  <div class="grid">
- ${kpi('File',esc(I.src.fileName),'',I.src.kind.toUpperCase()+(I.detNo?' · A/C '+esc(I.detNo):''))}
+ ${kpi('File',esc(I.src.fileName),'',I.src.kind.toUpperCase()+(I.detNo?' · A/C '+esc(I.detNo):'')+'<br>'+(f.source==='ledger'?'Company ledger layout (Dr = in)':'Bank statement layout (Dr = out)'))}
  <div class="card kpi"><div class="l">Account</div><div style="margin-top:6px">${acctSel}</div></div>
  ${kpi('Period',f.from?`${dmy(f.from)} – ${dmy(f.to)}`:'–','',f.from?monthLabel(monthKey(f.to)):'')}
  ${kpi('Transactions',String(rows.length),'',`${inc.length} to import · ${dups} duplicate${dups===1?'':'s'}`)}
@@ -801,6 +964,7 @@ function mapHtml(){
  const fieldOf=j=>(Object.entries(I.map).find(([f,v])=>v===j)||[''])[0];
  return`<div class="card"><h2>Map columns</h2><p class="muted small">Tell the system which column is which. It re-reads the file instantly and re-checks the reconciliation.</p>
  <div class="form"><label>Header row (line number, 0 = none)<input type="number" min="0" max="${raw.length}" data-chg="hIdx" value="${I.hIdx+1}"></label>
+ <label>Debit column means<select data-chg="orient">${[['auto','Detect automatically'],['bank','Money OUT (bank statement)'],['ledger','Money IN (company ledger / cash book)']].map(([v,l])=>`<option value="${v}" ${(I.orient||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label>
  <label>Date format<select data-chg="order">${[['AUTO','Automatic'],['DMY','Day/Month/Year'],['MDY','Month/Day/Year']].map(([v,l])=>`<option value="${v}" ${I.order===v?'selected':''}>${l}</option>`).join('')}</select></label>
  <label class="ck"><input type="checkbox" data-chg="saveMap" ${I.saveMap?'checked':''}> Remember this layout for this bank's files</label></div>
  <div class="tw" style="margin-top:10px"><table><thead><tr>${Array.from({length:n},(_,j)=>`<th><select class="map-sel" data-chg="mapCol" data-j="${j}">${FIELDS.map(([v,l])=>`<option value="${v}" ${fieldOf(j)===v?'selected':''}>${l}</option>`).join('')}</select><div class="muted" style="text-transform:none">${I.hIdx>=0?esc(raw[I.hIdx][j]??''):'col '+(j+1)}</div></th>`).join('')}</tr></thead>
@@ -817,6 +981,7 @@ CHG.impRem=el=>{IMP.rows[+el.dataset.i].remember=el.checked;};
 CHG.impInc=el=>{IMP.rows[+el.dataset.i].include=el.checked;rerender();};
 CHG.hIdx=el=>{IMP.hIdx=Math.max(-1,(+el.value||0)-1);const d=IMP.hIdx>=0?detectHeader([IMP.src.rows[IMP.hIdx]]):null;if(d)IMP.map=d.map;recompute();rerender();};
 CHG.order=el=>{IMP.order=el.value;recompute();rerender();};
+CHG.orient=el=>{IMP.orient=el.value;recompute();rerender();};
 CHG.saveMap=el=>{IMP.saveMap=el.checked;};
 CHG.mapCol=el=>{const j=+el.dataset.j,f=el.value;for(const k of Object.keys(IMP.map))if(IMP.map[k]===j||k===f)delete IMP.map[k];if(f)IMP.map[f]=j;recompute();rerender();};
 ACT.toggleMap=()=>{IMP.showMap=!IMP.showMap;rerender();};
@@ -830,7 +995,7 @@ ACT.confirmImport=async()=>{
  const inc=I.rows.filter(r=>r.include);const stId=uid();
  const st={id:stId,acc:accId,file:I.src.fileName,fileId,kind:I.src.kind,from:f.from,to:f.to,opening:f.opening,closing:f.closing,cr:f.cr,dr:f.dr,count:I.rows.length,imported:inc.length,dups:I.rows.length-inc.length,
   uploaded:old?old.uploaded:new Date().toISOString(),reprocessed:old?new Date().toISOString():null,recon:f.recon,
-  status:f.recon==null?'Imported – no balances to reconcile':Math.abs(f.recon)<0.51?'Imported':'Imported – UNRECONCILED',map:I.map,hIdx:I.hIdx,order:f.order};
+  status:f.recon==null?'Imported – no balances to reconcile':Math.abs(f.recon)<0.51?'Imported':'Imported – UNRECONCILED',map:I.map,hIdx:I.hIdx,order:f.order,orient:I.orient||'auto',source:f.source};
  const tx=inc.map(r=>({id:uid(),acc:accId,stmt:stId,date:r.date,desc:r.desc,dr:r.dr,cr:r.cr,bal:r.bal,chq:r.chq,ref:r.ref,seq:r.row,cat:r.cat,party:r.party,src:r.manual?'manual':r.src,key:txKey(accId,r)}));
  const newRules=[];
  inc.filter(r=>r.manual&&r.remember&&String(r.kw).trim()&&r.cat!=='Needs Review').forEach(r=>{const w=normWords(r.kw);if(!newRules.some(x=>x.words===w&&x.cat===r.cat))newRules.push({id:uid(),words:w,dir:r.cr>r.dr?'in':'out',cat:r.cat,party:r.party||'',builtin:false,created:Date.now()});});
@@ -838,7 +1003,7 @@ ACT.confirmImport=async()=>{
  S.statements.push(st);S.txns.push(...tx);S.rules.push(...newRules);
  let more=0;if(newRules.length)more=await reapplyRules(false);
  const closed=await matchChequePlans(tx);
- if(I.saveMap&&I.hIdx>=0){S.settings.mappings[headerSig(I.src.rows[I.hIdx])]=I.map;await saveSettings();}
+ if(I.saveMap&&I.hIdx>=0){S.settings.mappings[headerSig(I.src.rows[I.hIdx])]={map:I.map,orient:I.orient||'auto'};await saveSettings();}
  derive();IMP=null;S.ui.rp={type:'month',key:monthKey(f.to)};
  toast(`${old?'Reprocessed':'Imported'} ${tx.length} transactions${more?`; ${more} older ones classified by your new rules`:''}${closed?`; ${closed} expected cheque${closed>1?'s':''} marked cleared`:''}.`,5000);
  location.hash='#reports';
@@ -849,9 +1014,13 @@ async function reapplyRules(all,stmtId){
  if(ch.length)await DB.putMany('txns',ch.map(({rb,...t})=>t));return ch.length;
 }
 async function matchChequePlans(tx){
- const ch=[];for(const p of S.plans){if(p.status!=='open'||!p.chq||!['CHQ_IN','CHQ_OUT'].includes(p.kind))continue;
-  const t=tx.find(t=>t.chq&&t.chq.replace(/^0+/,'')===String(p.chq).replace(/^0+/,'')&&(p.kind==='CHQ_IN'?t.cr>0:t.dr>0)&&!RET_RX.test(t.desc));
-  if(t){p.status='done';p.doneDate=t.date;p.doneNote='Cleared per bank statement';ch.push(p);}}
+ const ch=[];const n=x=>String(x||'').replace(/^0+/,'');
+ for(const p of S.plans){if(p.status!=='open'||!p.chq||!['CHQ_IN','CHQ_OUT'].includes(p.kind))continue;
+  const same=tx.filter(t=>t.chq&&n(t.chq)===n(p.chq)&&Math.abs((t.cr||t.dr)-p.amount)<1);
+  const ret=same.find(t=>RET_RX.test(t.desc)&&(p.kind==='CHQ_IN'?t.dr>0:t.cr>0));
+  const hit=same.find(t=>!RET_RX.test(t.desc)&&(p.kind==='CHQ_IN'?t.cr>0:t.dr>0));
+  if(ret){p.status='returned';p.doneDate=ret.date;p.doneNote='Returned per bank data';ch.push(p);}
+  else if(hit){p.status='done';p.doneDate=hit.date;p.doneNote='Cleared per bank data';ch.push(p);}}
  if(ch.length)await DB.putMany('plans',ch);return ch.length;
 }
 
@@ -987,6 +1156,7 @@ VIEWS.plans=()=>{
  const accs=S.accounts;const k=e?e.kind:'COLLECTION';
  const inT=sum(open.filter(p=>PLAN_KINDS[p.kind].sign>0),p=>p.amount),outT=sum(open.filter(p=>PLAN_KINDS[p.kind].sign<0),p=>p.amount);
  return`<h1>Future commitments</h1><p class="muted" style="margin-top:-8px">Enter what is expected to come in and go out. These drive the forecast and the OD warnings. ${badge('EXPECTED')} = committed (collections due, cheques received/issued). ${badge('PLANNED')} = management's plan (scheduled payments).</p>
+ <div class="al info small">Cheques (received or issued) are easier to manage in the <a href="#planner">Cheque planner</a> — it plans deposit dates, handles clearing days and checks the OD limit.</div>
  ${!accs.length?'<div class="al att">Add a bank account first (upload a statement, or Settings → Bank accounts).</div>':`<div class="card"><h2>${e?'Edit commitment':'Add commitment'}</h2><div class="form">
  <label>Type<select id="pk">${Object.entries(PLAN_KINDS).map(([v,o])=>`<option value="${v}" ${k===v?'selected':''}>${o.label}</option>`).join('')}</select></label>
  <label>Date<input type="date" id="pd" value="${e?e.date:(asOf&&asOf>today?addDays(asOf,1):today)}"></label>
@@ -1056,6 +1226,156 @@ VIEWS.forecast=()=>{
 CHG.hz=el=>{S.ui.hz=+el.value;rerender();};
 CHG.baseline=async el=>{S.settings.baseline=el.checked;await saveSettings();rerender();};
 
+/* ---- Cheque planner ---- */
+function chqStatus(p,today,cut){
+ if(p.kind==='CHQ_OUT')return p.holdTo?`<span class="b b-PLANNED">HOLD TO ${dm(p.holdTo)}</span>`:'<span class="b b-EXPECTED">ISSUED</span>';
+ if(p.depDate)return`<span class="b b-ACTUAL">DEPOSITED ${dm(p.depDate)}</span>`;
+ if(p.date<cut)return'<span class="b b-red">STALE</span>';
+ if(p.date<=today){const n=daysBetween(p.date,today);return`<span class="b b-red">IN DRAWER${n?' '+n+'D':''}</span>`;}
+ return'<span class="b b-grey">POST-DATED</span>';}
+VIEWS.planner=()=>{
+ const ids=accIds(),today=todayIso(),cut=staleCut(),st=S.settings;
+ if(!S.accounts.length)return`<h1>Cheque planner</h1><div class="al att">Add a bank account first — upload a statement, or Settings → Bank accounts.</div>`;
+ const hz=S.ui.hz||st.horizon;const f=forecast(ids,{horizon:hz,baseline:st.baseline,stress:!!S.ui.stress});
+ const start=f?f.start:today,risky=riskyParties(),rate=+st.odRate||0;
+ const byD=(a,b)=>a.date<b.date?-1:a.date>b.date?1:0;
+ const open=S.plans.filter(p=>p.status==='open'&&ids.includes(p.acc));
+ const cin=open.filter(p=>p.kind==='CHQ_IN').sort(byD),cout=open.filter(p=>p.kind==='CHQ_OUT').sort(byD);
+ const hand=cin.filter(p=>!p.depDate),dep=cin.filter(p=>p.depDate);
+ const due=hand.filter(p=>p.date<=today&&p.date>=cut),stale=hand.filter(p=>p.date<cut),pdc=hand.filter(p=>p.date>today);
+ const tm=p=>chqTiming(p,start);const holdCost=rate?sum(due,p=>p.amount*rate/100*daysBetween(p.date,today)/365):0;
+ const rp=f&&f.limit?recoveryPlan(f):null;const dayOf=d=>f?f.days.find(x=>x.date===d):null;
+ let h=`<h1>Cheque planner</h1><p class="muted" style="margin-top:-8px">Plans when to bank the cheques you hold and shows when your own cheques will hit the account, so the OD stays inside the limit. Cheques count in the forecast on the day the money actually moves.</p>
+ <div class="grid">${kpi('Cheques in hand',rs(sum(hand,p=>p.amount)),'EXPECTED',`${hand.length} cheques · ${pdc.length} post-dated`)}
+ ${kpi('Due — deposit now',rs(sum(due,p=>p.amount)),'EXPECTED',due.length?`${due.length} dated today or earlier${holdCost?` · holding cost so far ${rs(holdCost)}`:''}`:'nothing waiting',false,due.length?'warn':'')}
+ ${kpi('Deposited, not cleared',rs(sum(dep,p=>p.amount)),'EXPECTED',`${dep.length} cheques`)}
+ ${kpi('Our cheques not presented',rs(sum(cout,p=>p.amount)),'EXPECTED',`${cout.length} cheques`)}
+ ${f&&f.limit?kpi('Lowest OD headroom',rs(f.limit+f.min.bal),'FORECAST','on '+dday(f.min.date),f.limit+f.min.bal<0):''}
+ ${f&&f.limit?kpi('Limit status',f.breach?'Over '+dmy(f.breach.date):'Within limit','FORECAST',f.breach?'by '+rs(f.breach.excess):`next ${f.horizon} days`,!!f.breach):''}</div>
+ <div class="card noprint"><div class="row sb"><h2>Assumptions</h2><span class="muted small">Holidays, OD rate, stale period: <a href="#settings">Settings</a></span></div><div class="form">
+ <label>Deposited cheques clear after (working days)<input type="number" min="0" max="5" data-chg="set" data-f="clearDays" data-num="1" value="${st.clearDays}"></label>
+ <label>Our cheques hit the account (working days after cheque date)<input type="number" min="0" max="10" data-chg="set" data-f="presentDays" data-num="1" value="${st.presentDays}"></label>
+ <label>Safety buffer (% of OD limit kept free)<input type="number" min="0" max="50" data-chg="set" data-f="bufferPct" data-num="1" value="${st.bufferPct}"></label>
+ <label>Horizon<select data-chg="hz">${[30,60,90,120].map(n=>`<option value="${n}" ${hz===n?'selected':''}>${n} days</option>`).join('')}</select></label>
+ <div><div class="small muted" style="margin-bottom:4px">Bank visit days</div><div class="row">${[1,2,3,4,5,6].map(d=>`<label class="small" style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-chg="bankDay" data-d="${d}" ${bankDayList().includes(d)?'checked':''}>${WD[d]}</label>`).join('')}</div></div>
+ <label class="ck"><input type="checkbox" data-chg="stress" ${S.ui.stress?'checked':''}> Stress test: assume cheques from customers who bounced before will bounce${risky.size?` (${risky.size} customer${risky.size>1?'s':''})`:''}</label></div>
+ ${S.ui.stress&&f&&f.excluded.length?`<p class="small warn">Stress test on: ${f.excluded.length} cheque(s), ${rs(sum(f.excluded,p=>p.amount))}, left out of the projection.</p>`:''}</div>`;
+ if(!f)h+=`<div class="al att">Upload a bank statement first — the plan starts from the latest actual balance. You can already enter cheques below.</div>`;
+ else{
+  const groups={};hand.filter(p=>p.date>=cut).forEach(p=>{const t=tm(p);(groups[t.dep]||(groups[t.dep]={dep:t.dep,eff:t.eff,list:[]})).list.push(p);});
+  const gl=Object.values(groups).sort((a,b)=>a.dep<b.dep?-1:1);
+  h+=`<div class="card"><h2>Recommended plan</h2><h3>1 · Deposit schedule</h3>`;
+  h+=gl.length?`<table><thead><tr><th>Take to bank</th><th class="n">Cheques</th><th class="n">Amount</th><th>Money in the account</th><th>From</th></tr></thead><tbody>${gl.slice(0,12).map(g=>`<tr><td><b>${dday(g.dep)}</b>${g.list.some(p=>p.date<=today)?' <span class="b b-red">DUE NOW</span>':''}</td><td class="n">${g.list.length}</td><td class="n">${fmt(sum(g.list,p=>p.amount))}</td><td>${dday(g.eff)}</td><td class="small muted">${g.list.slice(0,4).map(p=>esc(p.party||'—')).join(', ')}${g.list.length>4?'…':''}</td></tr>`).join('')}</tbody></table>${gl.length>12?`<p class="small muted">… ${gl.length-12} more dates in the table below.</p>`:''}
+   <p class="small muted">Rule: bank every cheque on the first bank-visit day on or after its cheque date. Holding a cheque that is already due never helps — it only keeps the OD and the interest higher.</p>`:'<p class="muted">No cheques in hand.</p>';
+  if(stale.length)h+=`<div class="al att small"><b>${stale.length} stale cheque${stale.length>1?'s':''}, ${rs(sum(stale,p=>p.amount))}</b> — dated more than ${st.staleMonths} months ago; the bank will not accept ${stale.length>1?'them':'it'}. Ask for replacements: ${stale.map(p=>esc(p.party||'—')).join(', ')}.</div>`;
+  h+=`<h3>2 · OD limit check</h3>`;
+  if(!f.limit)h+=`<p class="muted">Enter the approved OD limit in <a href="#settings">Settings → Bank accounts</a> to check the plan against the limit.</p>`;
+  else if(!rp.r0.breach)h+=`<div class="al ok"><div class="t">🟢 With this deposit plan the account stays within the limit and the ${st.bufferPct}% safety buffer</div><div class="small">Lowest projected headroom ${rs(f.limit+f.min.bal)} on ${dday(f.min.date)} (limit ${rs(f.limit)}; the buffer keeps ${rs(f.limit-rp.cap)} free).</div></div>`;
+  else{const r0=rp.r0,fin=rp.final;
+   h+=`<div class="al high"><div class="t">🔴 Projected OD passes the safe level (limit − ${st.bufferPct}% = ${rs(rp.cap)}) on ${dday(r0.breach.date)}</div><div class="small">Peak ${rs(r0.peakExcess)} above the safe level on ${dday(r0.peakDate)}${f.breach?` · over the approved limit itself from ${dday(f.breach.date)} (by up to ${rs(f.peakExcess)})`:' · still inside the approved limit'}.</div></div>`;
+   h+=`<h3>3 · Recovery plan — in order of what you control most</h3>`;
+   const lab={flex:'Move flexible payments (not yet issued)',hold:'Ask payees to present our cheques later',early:'Ask customers to pay earlier'};
+   if(rp.steps.length){let n=0;for(const sg of['flex','hold','early']){const ss=rp.steps.filter(x=>x.stage===sg);if(!ss.length)continue;
+    h+=`<p class="small" style="margin:8px 0 4px"><b>${lab[sg]}</b></p><table><tbody>${ss.map(x=>`<tr><td style="width:28px">${++n}.</td><td>${stepText(x)}<div class="small muted">Peak above safe level ${rs(x.before)} → ${rs(x.after)}</div></td><td class="noprint" style="white-space:nowrap;text-align:right"><button class="sm" data-act="applyStep" data-id="${x.e.id}" data-stage="${x.stage}" data-to="${x.to}">Apply</button></td></tr>`).join('')}</tbody></table>`;}}
+   else h+=`<p class="small">Nothing can be moved: no flexible payments, issued cheques or later collections around the problem dates.</p>`;
+   if(rp.windows.length)h+=`<p class="small" style="margin:10px 0 4px"><b>${rp.steps.length?'4 · Still needed after these steps':'Funding needed'}</b></p><table><tbody>${rp.windows.map(w=>{const days=daysBetween(w.from,w.to)+1,cost=rate?w.max*rate/100*days/365:0;return`<tr><td>Short-term funding or a temporary OD increase of <b>${rs(Math.ceil(w.max/1000)*1000)}</b> from ${dday(w.from)} to ${dday(w.to)} (${days} day${days>1?'s':''})${w.overLimit>0?` — at least ${rs(Math.ceil(w.overLimit/1000)*1000)} is needed just to stay within the approved limit`:' — the approved limit itself is not exceeded, this only restores the buffer'}${cost?` · interest about ${rs(cost)}`:''}.</td></tr>`;}).join('')}</tbody></table>`;
+   else h+=`<div class="al ok small" style="margin-top:8px">With these steps the projection stays within the safe level. Lowest headroom ${rs(f.limit+fin.min.bal)} on ${dday(fin.min.date)}.</div>`;
+   h+=`<p class="small muted">Options for management — nothing changes until you press Apply (after the supplier or customer has agreed).</p>`;}
+  h+=`</div>`;
+ }
+ const rowIn=p=>{const t=tm(p),st_=!p.depDate&&p.date<cut;return`<tr><td>${esc(p.chq||'—')}</td><td>${esc(p.party||'—')}${isRisky(p,risky)?' <span class="b b-red" title="A cheque from this customer was returned before">BOUNCED BEFORE</span>':''}${S.accounts.length>1?`<div class="muted small">${esc(accName(p.acc))}</div>`:''}</td><td>${esc(p.bank||'')}</td><td>${dmy(p.date)}</td><td class="n">${fmt(p.amount)}</td><td>${chqStatus(p,today,cut)}</td><td>${st_?'—':dday(t.dep)}</td><td>${st_?'—':dday(t.eff)}</td>
+  <td class="noprint" style="white-space:nowrap">${p.depDate?'':`<button class="sm" data-act="chqDep" data-id="${p.id}" ${p.date>today?'disabled title="Post-dated"':''}>Deposited</button> `}<button class="sm" data-act="chqClr" data-id="${p.id}">Cleared</button> <button class="sm d" data-act="chqRet" data-id="${p.id}">Returned</button> <button class="sm" data-act="chqEdit" data-id="${p.id}">Edit</button> <button class="sm d" data-act="planDel" data-id="${p.id}">✕</button></td></tr>`;};
+ h+=`<div class="card"><div class="row sb"><h2>Cheques received — not yet cleared (${cin.length})</h2><span class="small">${rs(sum(cin,p=>p.amount))}</span></div>${cin.length?`<div class="tw"><table><thead><tr><th>Cheque</th><th>From</th><th>Bank</th><th>Cheque date</th><th class="n">Amount</th><th>Status</th><th>Deposit on</th><th>Money in</th><th></th></tr></thead><tbody>${cin.map(rowIn).join('')}</tbody></table></div>`:'<p class="muted">None entered. Add them below, or import your cheque list from Excel.</p>'}</div>`;
+ const rowOut=p=>{const t=tm(p),d=dayOf(t.eff),u=f&&f.limit&&d?d.od/f.limit:null;return`<tr><td>${esc(p.chq||'—')}</td><td>${esc(p.party||'—')}${S.accounts.length>1?`<div class="muted small">${esc(accName(p.acc))}</div>`:''}</td><td>${dmy(p.date)}</td><td class="n">${fmt(p.amount)}</td><td>${chqStatus(p,today,cut)}</td><td>${dday(t.eff)}</td><td class="n ${utilCls(u)}">${u!=null?pct(u):'–'}</td>
+  <td class="noprint" style="white-space:nowrap"><button class="sm" data-act="chqClr" data-id="${p.id}">Presented</button> <button class="sm" data-act="chqEdit" data-id="${p.id}">Edit</button> <button class="sm" data-act="planCancel" data-id="${p.id}">Cancel</button> <button class="sm d" data-act="planDel" data-id="${p.id}">✕</button></td></tr>`;};
+ h+=`<div class="card"><div class="row sb"><h2>Our issued cheques — not yet presented (${cout.length})</h2><span class="small">${rs(sum(cout,p=>p.amount))}</span></div>${cout.length?`<div class="tw"><table><thead><tr><th>Cheque</th><th>To</th><th>Cheque date</th><th class="n">Amount</th><th>Status</th><th>Expected debit</th><th class="n">OD use that day</th><th></th></tr></thead><tbody>${cout.map(rowOut).join('')}</tbody></table></div>`:'<p class="muted">None entered.</p>'}</div>`;
+ if(f){const depBy={};hand.filter(p=>p.date>=cut).forEach(p=>{const t=tm(p);(depBy[t.dep]||(depBy[t.dep]=[])).push(p);});
+  const capL=rp?rp.cap:null;const rows=f.days.filter(d=>d.ev.length||depBy[d.date]||(capL&&d.od>capL));
+  h+=`<div class="card"><h2>Day-by-day position ${badge('FORECAST')}</h2>${rows.length?`<div class="tw"><table><thead><tr><th>Date</th><th class="n">Take to bank</th><th class="n">Cheques clearing in</th><th class="n">Our cheques out</th><th class="n">Other in / out</th><th class="n">Projected balance</th><th class="n">OD headroom</th><th>Status</th></tr></thead><tbody>${rows.map(d=>{
+   const ci=sum(d.ev.filter(e=>e.kind==='CHQ_IN'),e=>e.amt),co=-sum(d.ev.filter(e=>e.kind==='CHQ_OUT'),e=>e.amt),ot=sum(d.ev.filter(e=>e.kind!=='CHQ_IN'&&e.kind!=='CHQ_OUT'),e=>e.amt);const dp=depBy[d.date]||[];const hr=f.limit?f.limit-d.od:null;
+   const sb=!f.limit?'':d.od>f.limit?'<span class="b b-red">OVER LIMIT</span>':d.od>capL?'<span class="b b-EXPECTED">TIGHT</span>':'<span class="b b-ACTUAL">OK</span>';
+   return`<tr><td>${dday(d.date)}</td><td class="n">${dp.length?fmt(sum(dp,p=>p.amount))+` <span class="muted small">(${dp.length})</span>`:''}</td><td class="n pos">${ci?fmt(ci):''}</td><td class="n neg">${co?fmt(co):''}</td><td class="n">${ot?(ot>0?'+':'')+fmt(ot):''}</td><td class="n ${d.bal<0?'neg':''}">${fmt(d.bal)}</td><td class="n ${hr!=null&&hr<0?'neg':''}">${hr!=null?fmt(hr):'–'}</td><td>${sb}</td></tr>`;}).join('')}</tbody></table></div>`:'<p class="muted">No movements in the horizon.</p>'}
+   <div style="margin-top:12px">${forecastChart('pChart',ids,f,260,capL)}</div></div>`;}
+ const sd=S.ui.sdc;
+ h+=`<div class="card"><h2>When can we date a new cheque?</h2><p class="muted small" style="margin-top:0">Before writing a supplier cheque, find the earliest date it can carry without pushing the OD past the safe level.</p><div class="form">
+ <label>Amount (Rs.)<input type="number" id="sdA" min="0" value="${sd?sd.amount:''}"></label><label>Pay to<input id="sdP" value="${esc(sd?sd.party:'')}"></label><label>Cheque no. (optional)<input id="sdC" value="${esc(sd?sd.chq:'')}"></label><div class="row"><button class="p" data-act="sdFind">Find safe date</button></div></div>`;
+ if(sd&&f&&f.limit){const r=safeDateFor(f,sd.amount);
+  if(r.debit)h+=`<div class="al ${r.ok?'ok':'att'}" style="margin-top:10px"><div class="t">${r.ok?'🟢':'🟠'} Date the cheque ${dday(r.chqDate)} or later</div><div class="small">It would reach the account around ${dday(r.debit)}. ${r.ok?`Lowest headroom afterwards ${rs(f.limit+r.r.min.bal)} on ${dday(r.r.min.date)}.`:'This date adds nothing to the existing problem, but the projection is already above the safe level elsewhere — see the recovery plan.'}</div><div class="row" style="margin-top:6px"><button class="sm p" data-act="sdAdd" data-date="${r.chqDate}">Add as issued cheque dated ${dmy(r.chqDate)}</button></div></div>`;
+  else h+=`<div class="al high" style="margin-top:10px"><div class="t">No date in the next ${f.horizon} days is safe for ${rs(sd.amount)}</div><div class="small">The least harmful date is ${dday(r.best.chqDate)}, but it still adds ${rs(r.best.inc)} to the peak. Split the payment, or arrange funding first.</div></div>`;}
+ else if(sd)h+=`<p class="small warn" style="margin-top:8px">Needs a bank statement and the OD limit to calculate.</p>`;
+ h+=`</div>`;
+ const e=S.ui.editChq?S.plans.find(p=>p.id===S.ui.editChq):null;
+ h+=`<div class="card"><h2>${e?'Edit cheque':'Add cheque'}</h2><div class="form">
+ <label>Type<select id="cqK"><option value="CHQ_IN" ${!e||e.kind==='CHQ_IN'?'selected':''}>Received (customer / others)</option><option value="CHQ_OUT" ${e&&e.kind==='CHQ_OUT'?'selected':''}>Issued by us</option></select></label>
+ <label>Cheque no.<input id="cqN" value="${esc(e?e.chq:'')}"></label>
+ <label>Cheque date<input type="date" id="cqD" value="${e?e.date:today}"></label>
+ <label>Amount (Rs.)<input type="number" id="cqA" min="0" step="0.01" value="${e?e.amount:''}"></label>
+ <label>Customer / payee<input id="cqP" value="${esc(e?e.party:'')}"></label>
+ <label>Drawer bank<input id="cqB" value="${esc(e?e.bank||'':'')}"></label>
+ <label>Account<select id="cqAc">${S.accounts.map(a=>`<option value="${a.id}" ${(e?e.acc:ids[0])===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+ <label>Note<input id="cqT" value="${esc(e?e.note||'':'')}"></label>
+ <div class="row"><button class="p" data-act="chqSave">${e?'Save':'Add cheque'}</button>${e?'<button data-act="chqEditCancel">Cancel</button>':''}</div></div></div>`;
+ const ci=S.ui.ci;
+ h+=`<div class="card"><h2>Import cheque list (Excel / CSV)</h2><p class="muted small" style="margin-top:0">Use your own cheque register as it is — the system finds the columns (cheque no., date, amount, customer/payee, bank) and you can correct them.</p>
+ <div class="form"><label>These cheques are<select id="ciK" data-chg="ciKind"><option value="CHQ_IN" ${!ci||ci.kind==='CHQ_IN'?'selected':''}>Received from customers / others</option><option value="CHQ_OUT" ${ci&&ci.kind==='CHQ_OUT'?'selected':''}>Issued by us</option></select></label>
+ <label>File<input type="file" accept=".xlsx,.xls,.csv,.txt" data-chg="ciFile"></label></div>${ci?ciPreview(ci):''}</div>`;
+ return h;
+};
+const CHQ_FIELDS=[['','— ignore —'],['chq','Cheque no.'],['date','Cheque date'],['amt','Amount'],['party','Customer / payee'],['bank','Bank'],['type','Type (in / out)'],['dep','Deposit date']];
+const CHQ_HDR=[['type',['type','in/out','direction']],['dep',['deposit date','deposited on','banked on','date deposited']],['date',['cheque date','chq date','cheque dt','date']],['chq',['cheque no','chq no','cheque number','chq number','cheque #','check no','instrument','cheque','chq']],['amt',['amount','value','amt']],['bank',['drawee bank','drawer bank','bank name','bank','drawee']],['party',['customer','payee','supplier','party','name','drawer','received from','issued to','particulars','description']]];
+function detectChqHeader(rows){ // most specific heading wins (e.g. "Chq Date" beats "Received Date")
+ const pairs=CHQ_HDR.flatMap(([f,ks])=>ks.map(k=>[f,k])).sort((a,b)=>b[1].length-a[1].length);let best=null;
+ for(let i=0;i<Math.min(rows.length,40);i++){const hs=(rows[i]||[]).map(c=>typeof c==='string'?normH(c):'');const map={},used=new Set();
+  for(const[f,k]of pairs){if(map[f]!=null)continue;const j=hs.findIndex((h,jj)=>!used.has(jj)&&h&&h.length<=40&&kwMatch(h,k));if(j>=0){map[f]=j;used.add(j);}}
+  const sc=Object.keys(map).length;if(map.date!=null&&map.amt!=null&&(!best||sc>best.sc))best={idx:i,map,sc};}
+ return best;}
+function ciParse(ci){const{rows,hIdx,map}=ci;const get=(r,f)=>map[f]!=null?(r[map[f]]??''):'';const order=detectOrder(rows.slice(hIdx+1).map(r=>get(r,'date')),S.settings.dateOrder);const out=[],bad=[];
+ for(let i=hIdx+1;i<rows.length;i++){const r=rows[i]||[];if(!r.some(c=>String(c).trim()))continue;const d=parseDate(get(r,'date'),order),a=parseAmount(get(r,'amt'));
+  if(!d||!a){if(String(get(r,'amt')).trim()||String(get(r,'chq')).trim())bad.push(i+1);continue;}
+  const tv=String(get(r,'type')).toUpperCase();const kind=/OUT|ISSU|PAID|PAY|SUPPL/.test(tv)?'CHQ_OUT':/\bIN\b|REC|CUST|DEP/.test(tv)?'CHQ_IN':ci.kind;
+  out.push({kind,chq:digits(get(r,'chq')),date:d,amount:round2(Math.abs(a)),party:String(get(r,'party')).trim(),bank:String(get(r,'bank')).trim(),depDate:map.dep!=null?parseDate(get(r,'dep'),order):null});}
+ const n=x=>String(x||'').replace(/^0+/,'');out.forEach(x=>x.dup=S.plans.some(p=>p.kind===x.kind&&Math.abs(p.amount-x.amount)<0.01&&(x.chq?n(p.chq)===n(x.chq):p.date===x.date&&p.party===x.party)));
+ return{out,bad};}
+function ciPreview(ci){const{out,bad}=ciParse(ci);const n=Math.max(0,...ci.rows.slice(ci.hIdx,ci.hIdx+8).map(r=>r.length));const fieldOf=j=>(Object.entries(ci.map).find(([f,v])=>v===j)||[''])[0];const nw=out.filter(x=>!x.dup);
+ return`<p class="small" style="margin-top:10px"><b>${esc(ci.fileName)}</b> — ${out.length} cheques found (${rs(sum(out,x=>x.amount))}; received ${out.filter(x=>x.kind==='CHQ_IN').length}, issued ${out.filter(x=>x.kind==='CHQ_OUT').length})${out.length-nw.length?`, ${out.length-nw.length} already in the system (skipped)`:''}${bad.length?`, <span class="neg">${bad.length} rows without a readable date or amount (lines ${bad.slice(0,8).join(', ')}${bad.length>8?'…':''})</span>`:''}.</p>
+ <div class="form"><label>Header row<input type="number" min="1" data-chg="ciH" value="${ci.hIdx+1}"></label><label>Account<select data-chg="ciAcc">${S.accounts.map(a=>`<option value="${a.id}" ${ci.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label></div>
+ <div class="tw" style="margin-top:8px"><table><thead><tr>${Array.from({length:n},(_,j)=>`<th><select class="map-sel" data-chg="ciMap" data-j="${j}">${CHQ_FIELDS.map(([v,l])=>`<option value="${v}" ${fieldOf(j)===v?'selected':''}>${l}</option>`).join('')}</select><div class="muted" style="text-transform:none">${esc(ci.rows[ci.hIdx][j]??'')}</div></th>`).join('')}</tr></thead><tbody>${ci.rows.slice(ci.hIdx+1,ci.hIdx+7).map(r=>`<tr>${Array.from({length:n},(_,j)=>`<td>${esc(r[j]??'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
+ <div class="row" style="margin-top:8px"><button class="p" data-act="ciImport" ${nw.length&&ci.acc?'':'disabled'}>Import ${nw.length} cheques</button><button data-act="ciCancel">Cancel</button></div>`;}
+CHG.ciKind=el=>{if(S.ui.ci){S.ui.ci.kind=el.value;rerender();}};
+CHG.ciFile=async el=>{const file=el.files[0];if(!file)return;try{const src=readSheet(file.name,await file.arrayBuffer());const d=detectChqHeader(src.rows);const sig=d?headerSig(src.rows[d.idx]):null;const saved=sig&&(S.settings.chqMappings||{})[sig];
+ S.ui.ci={fileName:file.name,rows:src.rows,hIdx:d?d.idx:0,map:saved?{...saved}:d?d.map:{},kind:$('#ciK').value,acc:accIds()[0]||(S.accounts[0]||{}).id};
+ if(!d)toast('Column headings not recognised — choose the columns in the table.',6000);rerender();}catch(err){toast(err.message,6000);}};
+CHG.ciH=el=>{const ci=S.ui.ci;ci.hIdx=Math.min(ci.rows.length-1,Math.max(0,(+el.value||1)-1));const d=detectChqHeader([ci.rows[ci.hIdx]]);if(d)ci.map=d.map;rerender();};
+CHG.ciAcc=el=>{S.ui.ci.acc=el.value;rerender();};
+CHG.ciMap=el=>{const ci=S.ui.ci,j=+el.dataset.j,fd=el.value;for(const k of Object.keys(ci.map))if(ci.map[k]===j||k===fd)delete ci.map[k];if(fd)ci.map[fd]=j;rerender();};
+ACT.ciCancel=()=>{S.ui.ci=null;rerender();};
+ACT.ciImport=async()=>{const ci=S.ui.ci;const{out}=ciParse(ci);
+ const nw=out.filter(x=>!x.dup).map(x=>{const p={id:uid(),acc:ci.acc,kind:x.kind,date:x.date,amount:x.amount,party:x.party,bank:x.bank,chq:x.chq,flexible:false,note:'Imported from '+ci.fileName,status:'open',created:Date.now()};if(x.depDate)p.depDate=x.depDate;return p;});
+ await DB.putMany('plans',nw);S.plans.push(...nw);S.settings.chqMappings=S.settings.chqMappings||{};S.settings.chqMappings[headerSig(ci.rows[ci.hIdx])]=ci.map;await saveSettings();
+ const closed=await matchChequePlans(S.txns);S.ui.ci=null;toast(`Imported ${nw.length} cheques${closed?`; ${closed} already cleared or returned per bank data`:''}.`,5000);rerender();};
+ACT.chqDep=async b=>{const p=S.plans.find(x=>x.id===b.dataset.id);const t=todayIso();if(p.date>t)return toast('Post-dated — the bank will not accept it before '+dmy(p.date)+'.',5000);
+ p.depDate=t;await DB.put('plans',p);toast('Marked deposited today; money expected '+dday(addWork(t,+S.settings.clearDays||0))+'.');rerender();};
+ACT.chqClr=async b=>{const p=S.plans.find(x=>x.id===b.dataset.id);p.status='done';p.doneDate=todayIso();p.doneNote=p.kind==='CHQ_IN'?'Cleared (marked)':'Presented (marked)';await DB.put('plans',p);toast('Done — removed from the projection.');rerender();};
+ACT.chqRet=async b=>{const p=S.plans.find(x=>x.id===b.dataset.id);if(!confirm('Mark this cheque as returned (bounced)?'))return;p.status='returned';p.doneDate=todayIso();p.doneNote='Returned';await DB.put('plans',p);toast('Marked returned — follow up with '+(p.party||'the customer')+'.');rerender();};
+ACT.chqEdit=b=>{S.ui.editChq=b.dataset.id;rerender();setTimeout(()=>{const el=$('#cqN');if(el)el.scrollIntoView({block:'center'});},50);};
+ACT.chqEditCancel=()=>{S.ui.editChq=null;rerender();};
+ACT.chqSave=async()=>{const amt=+$('#cqA').value,date=$('#cqD').value;if(!date)return toast('Enter the cheque date.');if(!(amt>0))return toast('Enter the amount.');
+ const e=S.ui.editChq?S.plans.find(p=>p.id===S.ui.editChq):null;
+ const p={...(e||{id:uid(),status:'open',created:Date.now(),flexible:false}),kind:$('#cqK').value,chq:digits($('#cqN').value),date,amount:round2(amt),party:$('#cqP').value.trim(),bank:$('#cqB').value.trim(),acc:$('#cqAc').value,note:$('#cqT').value.trim()};
+ const n=x=>String(x||'').replace(/^0+/,'');if(!e&&p.chq&&S.plans.some(x=>x.kind===p.kind&&n(x.chq)===n(p.chq)&&Math.abs(x.amount-p.amount)<0.01))return toast('This cheque is already entered.');
+ await DB.put('plans',p);if(e)Object.assign(e,p);else S.plans.push(p);S.ui.editChq=null;toast(e?'Saved.':'Cheque added.');rerender();};
+ACT.sdFind=()=>{const a=+$('#sdA').value;if(!(a>0))return toast('Enter the amount.');S.ui.sdc={amount:a,party:$('#sdP').value.trim(),chq:digits($('#sdC').value)};rerender();};
+ACT.sdAdd=async b=>{const sd=S.ui.sdc,acc=accIds()[0];if(!sd||!acc)return;const p={id:uid(),acc,kind:'CHQ_OUT',date:b.dataset.date,amount:round2(sd.amount),party:sd.party,chq:sd.chq,bank:'',flexible:false,note:'Dated with the Cheque planner',status:'open',created:Date.now()};
+ await DB.put('plans',p);S.plans.push(p);S.ui.sdc=null;toast('Added to our issued cheques.');rerender();};
+ACT.applyStep=async b=>{const p=S.plans.find(x=>x.id===b.dataset.id);if(!p)return;const to=b.dataset.to,sg=b.dataset.stage,add=t=>p.note=(p.note?p.note+' · ':'')+t;
+ if(sg==='flex'){add(`Moved from ${dmy(p.date)}`);p.date=to;}
+ else if(sg==='hold'){p.holdTo=subWork(to,+S.settings.presentDays||0);add(`Payee agreed to present on/after ${dmy(p.holdTo)}`);}
+ else{if(p.kind==='CHQ_IN'){add(`Replaces cheque #${p.chq||'—'} dated ${dmy(p.date)}`);p.kind='COLLECTION';p.chq='';}else add(`Brought forward from ${dmy(p.date)}`);p.date=to;}
+ await DB.put('plans',p);toast('Applied — the plan has been recalculated.');rerender();};
+CHG.bankDay=async el=>{const d=+el.dataset.d;let a=[...bankDayList()];a=el.checked?[...new Set([...a,d])]:a.filter(x=>x!==d);if(!a.length){el.checked=true;return toast('Keep at least one bank day.');}
+ S.settings.bankDays=a.sort();await saveSettings();rerender();};
+CHG.stress=el=>{S.ui.stress=el.checked;rerender();};
+
 /* ---- Action center ---- */
 VIEWS.actions=()=>{const items=actionItems(accIds());
  return`<h1>What should management do?</h1><p class="muted" style="margin-top:-8px">Calculated from actual bank data and the commitments entered. Suggestions for review only.</p>${items.map(alertHtml).join('')}`;};
@@ -1080,7 +1400,7 @@ ACT.cf=b=>{S.ui.cf=b.dataset.k;rerender();};
 VIEWS.history=()=>{const ids=accIds();const l=S.statements.filter(s=>ids.includes(s.acc)).sort((a,b)=>a.from<b.from?1:-1);
  return`<h1>Upload history</h1><div class="card">${l.length?`<div class="tw"><table><thead><tr><th>File</th><th>Month</th><th>Account</th><th>Uploaded</th><th class="n">Transactions</th><th class="n">Opening</th><th class="n">Closing</th><th>Status</th><th></th></tr></thead><tbody>
  ${l.map(s=>`<tr><td>${esc(s.file)}</td><td>${monthLabel(monthKey(s.to))}<div class="muted small">${dmy(s.from)}–${dmy(s.to)}</div></td><td>${esc(accName(s.acc))}</td><td>${dmy(s.uploaded.slice(0,10))}${s.reprocessed?`<div class="muted small">reprocessed ${dmy(s.reprocessed.slice(0,10))}</div>`:''}</td><td class="n">${s.imported}${s.dups?`<div class="muted small">${s.dups} skipped</div>`:''}</td><td class="n">${fmt(s.opening)}</td><td class="n">${fmt(s.closing)}</td>
- <td>${/UNRECON/.test(s.status)?`<span class="b b-red">UNRECONCILED</span><div class="small">diff ${rs(s.recon)}</div>`:/no balances/.test(s.status)?'<span class="b b-EXPECTED">NOT RECONCILED</span>':'<span class="b b-ACTUAL">IMPORTED</span>'}</td>
+ <td>${s.source==='ledger'?'<span class="b b-grey">LEDGER</span> ':''}${/UNRECON/.test(s.status)?`<span class="b b-red">UNRECONCILED</span><div class="small">diff ${rs(s.recon)}</div>`:/no balances/.test(s.status)?'<span class="b b-EXPECTED">NOT RECONCILED</span>':'<span class="b b-ACTUAL">IMPORTED</span>'}</td>
  <td style="white-space:nowrap"><button class="sm" data-act="hView" data-id="${s.id}">View</button> <button class="sm" data-act="hRe" data-id="${s.id}" ${s.fileId?'':'disabled'}>Reprocess</button> <button class="sm" data-act="hDl" data-id="${s.id}" ${s.fileId?'':'disabled'}>Original</button> <button class="sm d" data-act="hDel" data-id="${s.id}">Delete</button></td></tr>`).join('')}</tbody></table></div>
  <p class="muted small">Reprocess re-reads the stored file with the current mapping and rules, then replaces that statement (categories you set by hand are kept). Delete removes the statement and its transactions. Demo statements have no stored file.</p>`:'<p class="muted">No statements yet.</p>'}</div>`;};
 ACT.hView=b=>{S.ui.tf={q:'',m:'',cat:'',stmt:b.dataset.id};location.hash='#txns';};
@@ -1102,6 +1422,13 @@ VIEWS.settings=()=>{const st=S.settings;const ur=S.rules.filter(r=>!r.builtin).s
  <div class="card"><div class="row sb"><h2>Bank accounts & OD limits</h2><button data-act="addAcc">+ Add account</button></div>
  <div class="tw"><table><thead><tr><th>Name</th><th>Bank</th><th>Account no.</th><th class="n">Approved OD limit (Rs.)</th><th class="n">Transactions</th><th></th></tr></thead><tbody>
  ${S.accounts.map(a=>`<tr><td><input data-chg="accEdit" data-id="${a.id}" data-f="name" value="${esc(a.name)}"></td><td><input data-chg="accEdit" data-id="${a.id}" data-f="bank" value="${esc(a.bank)}" size="14"></td><td><input data-chg="accEdit" data-id="${a.id}" data-f="number" value="${esc(a.number)}" size="14"></td><td class="n"><input type="number" min="0" data-chg="accEdit" data-id="${a.id}" data-f="odLimit" value="${a.odLimit||0}" style="text-align:right;width:140px"></td><td class="n">${S.txns.filter(t=>t.acc===a.id).length}</td><td><button class="sm d" data-act="delAcc" data-id="${a.id}">✕</button></td></tr>`).join('')||'<tr><td colspan="6" class="muted">No accounts yet — one is created on the first upload.</td></tr>'}</tbody></table></div></div>
+ <div class="card"><h2>Cheque & OD planning</h2><div class="form">
+ <label>Deposited cheques clear after (working days)<input type="number" min="0" max="5" data-chg="set" data-f="clearDays" data-num="1" value="${st.clearDays}"></label>
+ <label>Our cheques hit the account (working days after cheque date)<input type="number" min="0" max="10" data-chg="set" data-f="presentDays" data-num="1" value="${st.presentDays}"></label>
+ <label>Safety buffer (% of OD limit kept free)<input type="number" min="0" max="50" data-chg="set" data-f="bufferPct" data-num="1" value="${st.bufferPct}"></label>
+ <label>OD interest rate (% a year — for cost estimates)<input type="number" min="0" max="60" step="0.01" data-chg="set" data-f="odRate" data-num="1" value="${st.odRate}"></label>
+ <label>Cheques go stale after (months)<input type="number" min="1" max="12" data-chg="set" data-f="staleMonths" data-num="1" value="${st.staleMonths}"></label></div>
+ <label style="display:grid;gap:3px;font-size:12px;color:var(--mut);margin-top:10px">Bank & public holidays (no clearing) — dates separated by commas, e.g. 06/10/2026, 20/10/2026<textarea data-chg="set" data-f="holidays" rows="2">${esc(st.holidays)}</textarea></label></div>
  <div class="card"><h2>Classification rules</h2><p class="muted small" style="margin-top:0">If the description contains any of the keywords (comma-separated), the category and customer/supplier are set. Your rules are checked first, newest first, then the built-in rules.</p>
  <div class="form"><label>Keywords<input id="nrW" placeholder="e.g. KEELLS, JKH"></label><label>Money<select id="nrD"><option value="any">In or out</option><option value="in">In only</option><option value="out">Out only</option></select></label><label>Category<select id="nrC">${catOptions('Customer Collection')}</select></label><label>Customer / supplier<input id="nrP"></label><div class="row"><button class="p" data-act="addRule">Add rule</button><button data-act="rerun">Re-run rules on all transactions</button></div></div>
  <div class="tw" style="margin-top:10px"><table><thead><tr><th>Keywords</th><th>Money</th><th>Category</th><th>Customer / supplier</th><th></th></tr></thead><tbody>${ur.map(ruleRow).join('')||'<tr><td colspan="5" class="muted">None yet — they are created when you classify “Needs review” items.</td></tr>'}</tbody></table></div>
@@ -1109,7 +1436,7 @@ VIEWS.settings=()=>{const st=S.settings;const ur=S.rules.filter(r=>!r.builtin).s
  <div class="card"><h2>Data</h2><p class="muted small" style="margin-top:0">All data is stored in this browser on this computer${MEMORY_ONLY?' — <b class="neg">storage is blocked in this browser, data is lost when the page closes</b>':''}. Take a backup after each monthly upload. Backups do not include the original statement files.</p>
  <div class="row"><button data-act="backup">Download backup</button><label class="btn">Restore backup<input type="file" accept=".json" data-chg="restore" style="display:none"></label><button data-act="exportAll">Export all transactions (CSV)</button><button data-act="demo">Load demo data</button><button class="d" data-act="wipe">Delete all data</button></div></div>`;};
 const ruleRow=r=>`<tr><td>${esc(r.words)}</td><td>${{any:'In/out',in:'In',out:'Out'}[r.dir]}</td><td>${r.cat}</td><td>${esc(r.party)}</td><td><button class="sm d" data-act="delRule" data-id="${r.id}">✕</button></td></tr>`;
-CHG.set=async el=>{S.settings[el.dataset.f]=el.dataset.num?+el.value:el.value;await saveSettings();renderAccSel();toast('Saved.');};
+CHG.set=async el=>{S.settings[el.dataset.f]=el.dataset.num?+el.value:el.value;await saveSettings();renderAccSel();toast('Saved.');if(['planner','forecast','dash','actions'].includes(S.ui.page))rerender();};
 CHG.accEdit=async el=>{const a=S.accounts.find(x=>x.id===el.dataset.id);a[el.dataset.f]=el.dataset.f==='odLimit'?+el.value||0:el.value;await DB.put('accounts',a);renderAccSel();toast('Saved.');};
 ACT.addAcc=async()=>{const a={id:uid(),name:'New account',bank:'',number:'',odLimit:0};await DB.put('accounts',a);S.accounts.push(a);derive();rerender();};
 ACT.delAcc=async b=>{const id=b.dataset.id;if(S.txns.some(t=>t.acc===id))return toast('This account has transactions. Delete its statements in Upload history first.',5000);if(!confirm('Delete this account?'))return;await DB.del('accounts',id);S.accounts=S.accounts.filter(a=>a.id!==id);if(S.ui.acc===id)S.ui.acc='ALL';derive();rerender();};
@@ -1173,8 +1500,12 @@ function buildDemo(now,T={start:-7600000,e1:380000,e2:760000,l1:180000,l2:420000
   P(10,'COLLECTION',1000000,'Keells Super'),P(11,'COLLECTION',800000,'Laugfs Super'),P(13,'COLLECTION',500000,'Keells Super'),P(14,'COLLECTION',900000,'Arpico Supercentre'),P(16,'COLLECTION',700000,'Lanka Sathosa'),P(18,'COLLECTION',600000,'Cargills Food City'),P(19,'COLLECTION',600000,'Glomark'),P(22,'COLLECTION',800000,'Keells Super'),
   P(5,'EXPENSE',350000,'Rent – stores'),P(15,'EXPENSE',720000,'CEB'),P(25,'EXPENSE',4300000,'Salaries'),P(25,'EXPENSE',560000,'EPF / ETF'),
   P(20,'CHQ_OUT',1800000,'Prima Ceylon',false,'345920'),P(27,'CHQ_OUT',1600000,'CIC Holdings',false,'345921'),
+  P(23,'CHQ_OUT',1200000,'DPL Packaging',false,'345922'),P(27,'SUPPLIER',2400000,'CIC Holdings',true),P(30,'SUPPLIER',1500000,'Serendib Flour Mills',true),
   P(24,'SUPPLIER',2200000,'Serendib Flour Mills',true),P(26,'SUPPLIER',1500000,'DPL Packaging',true),P(28,'SUPPLIER',2600000,'Prima Ceylon',true),P(29,'SUPPLIER',1200000,'Serendib Flour Mills',true),
   P(33,'COLLECTION',1300000,'Keells Super'),P(34,'CHQ_IN',1400000,'Arpico Supercentre',false,'610003'),P(35,'COLLECTION',1000000,'Cargills Food City'),P(36,'COLLECTION',900000,'Laugfs Super'));
+ // Cheques in hand: two already due (in the drawer), three post-dated.
+ plans.push(...[['demo-c1',-6,640000,'Cargills Food City','BOC','771201'],['demo-c2',-2,820000,'Keells Super','Sampath','338410'],['demo-c3',4,540000,'Laugfs Super','HNB','119023'],['demo-c4',11,380000,'Glomark','NSB','554812'],['demo-c5',16,910000,'Arpico Supercentre','Commercial','602277']]
+  .map(([id,o,amount,party,bank,chq])=>({id,acc:acc.id,kind:'CHQ_IN',date:addDays(today,o),amount,party,bank,chq,flexible:false,note:'',status:'open',created:0})));
  return{acc,rules,stmts,lists,plans};
 }
 ACT.demo=async()=>{
