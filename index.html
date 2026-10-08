@@ -89,7 +89,7 @@ ul.ins{margin:0;padding-left:18px}ul.ins li{margin:4px 0}
 <script>
 'use strict';
 /* =====================================================================
-   BANK & OD CONTROL — single-file app (v1.0)
+   BANK & OD CONTROL — single-file app (v1.1 — ERP bank book import, exact safe cheque dates, 7-page layout)
    Layers (top → bottom of this file):
      1 CONFIG      categories, default rules, plan types, settings
      2 UTIL        dates, amounts, formatting
@@ -132,7 +132,7 @@ const PLAN_KINDS={
 
 // Built-in keyword rules, checked in this order AFTER the user's own rules.
 // d: in = money in only, out = money out only, any = both.
-const RULES_VER=2; // bump when the built-in rules change; older copies are replaced on load
+const RULES_VER=3; // bump when the built-in rules change; older copies are replaced on load
 const RET_WORDS='RETURN,RETURNED,RTN,UNPAID,DISHONOURED,DISHONORED,REFER TO DRAWER,BOUNCED,BOUNCE';
 const DEFAULT_RULES=[
  {w:RET_WORDS,d:'out',c:'Returned Cheque'},
@@ -143,7 +143,8 @@ const DEFAULT_RULES=[
  {w:'TRADE RECEIVABLE,TRADE RECEIVABLES,DEBTOR,DEBTORS,CUSTOMER RECEIPT,INVOICE PAYMENT,CUSTOMER ADVANCES',d:'in',c:'Customer Collection'},
  {w:'CREDITOR,CREDITORS,GRN,SUPPLIER PAYMENT',d:'out',c:'Supplier Payment'},
  {w:'PRODUCTION EXPENSES,RAW MATERIAL,RAW MATERIALS,PURCHASE,PURCHASES',d:'out',c:'Purchase Payment'},
- {w:'SALARY,SALARIES,PAYROLL,EPF,ETF,WAGES',d:'out',c:'Salary'},
+ {w:'SALARY,SALARIES,PAYROLL,EPF,ETF,WAGES,GRATUITY,BONUS',d:'out',c:'Salary'},
+ {w:'STANDING ORDER,SO,SSCL',d:'out',c:'Other Expenses'},
  {w:'CEB,LECO,ELECTRICITY',d:'out',c:'Electricity'},
  {w:'FUEL,CEYPETCO,LIOC,FILLING,PETROL,DIESEL',d:'out',c:'Fuel'},
  {w:'RENT',d:'out',c:'Rent'},
@@ -154,7 +155,7 @@ const DEFAULT_RULES=[
  {w:'TRANSPORT,LORRY,FREIGHT,COURIER,HIRE',d:'out',c:'Transport'},
  {w:'OTHER PAYABLE,OTHER PAYABLES,ACCRUED EXPENSES,ACCRUED BILL,VAT CONTROL,VAT,TAX PAYMENT',d:'out',c:'Other Expenses'},
  {w:'INTEREST',d:'in',c:'Other Income'},
- {w:'CASH DEP,CASH DEPOSIT,CDM',d:'in',c:'Sales Collection'},
+ {w:'CASH DEP,CASH DEPOSIT,CDM,DEPOSIT,DEPOSITS',d:'in',c:'Sales Collection'},
  {w:'CHQ,CHEQUE,CLEARING,CLG,CHK,REALIZED,REALISED',d:'in',c:'Incoming Cheque'},
  {w:'CHQ,CHEQUE,CLEARING,CLG,CHK',d:'out',c:'Outgoing Cheque'},
  {w:'CEFT,SLIPS,TRANSFER,TRF,FUND TRANSFER,LANKAPAY,RTGS,IBT',d:'in',c:'Bank Transfer In'},
@@ -236,9 +237,12 @@ function parseAmount(v){
 const isAmountText=c=>typeof c==='number'?true:(parseAmount(c)!==null&&/[.,]/.test(String(c)));
 
 /* ---------- 3. IMPORT ENGINE ---------- */
-const FIELDS=[['','— ignore —'],['date','Date'],['desc','Description'],['dr','Debit (money out)'],['cr','Credit (money in)'],['amt','Amount (+ in / − out)'],['drcr','DR/CR flag'],['bal','Balance'],['chq','Cheque no.'],['ref','Reference']];
+const FIELDS=[['','— ignore —'],['date','Date'],['desc','Description'],['dr','Debit (money out)'],['cr','Credit (money in)'],['amt','Amount (+ in / − out)'],['drcr','DR/CR flag'],['bal','Balance'],['chq','Cheque no.'],['ref','Reference'],['chg','Other charges (money out)'],['acct','Bank / account ID'],['status','Status (Actual / Planned…)']];
 // Order matters: a header cell is given to the first field that matches.
 const HDR=[
+ ['status',['status','entry status']],
+ ['chg',['other charges','bank charges','charges']],
+ ['acct',['bank account id','bank account','account id']],
  ['drcr',['dr/cr','cr/dr','d/c','dr cr','cr dr','debit/credit','credit/debit','dr or cr']],
  ['date',['transaction date','txn date','tran date','trans date','posting date','post date','value date','date']],
  ['bal',['running balance','balance']],
@@ -258,6 +262,8 @@ function detectHeader(rows){
   const map={};let score=0;
   (rows[i]||[]).forEach((c,j)=>{if(typeof c!=='string')return;const h=normH(c);if(!h||h.length>40)return;
    for(const[f,kws]of HDR){if(map[f]!=null)continue;if(kws.some(k=>kwMatch(h,k))){map[f]=j;score++;break;}}});
+  // "Description" beats "Transaction Type" for the description column (ERP reports print both).
+  if(map.desc!=null&&/transaction/.test(normH(rows[i][map.desc]))){const k=(rows[i]||[]).findIndex((c,j)=>j!==map.desc&&typeof c==='string'&&/description|particulars|narration|narrative|details|remarks/.test(normH(c)));if(k>=0)map.desc=k;}
   const ok=map.date!=null&&(map.dr!=null||map.cr!=null||map.amt!=null);
   if(ok&&(!best||score>best.score))best={idx:i,score,map};
  }
@@ -291,49 +297,106 @@ function gapThreshold(g){
  if(!best)return Infinity;const lo=s.slice(0,best.k),hi=s.slice(best.k);
  if(hi.length<2||sum(hi)/hi.length<1.4*sum(lo)/lo.length)return Infinity;return(s[best.k-1]+s[best.k])/2;
 }
+/* PDF reading.
+ *  Two ways of splitting each printed line into columns are tried, and the one that reads more transactions
+ *  (and reconciles) is used:
+ *   A) "header" method — each text piece goes to the nearest printed column heading (good for normal bank PDFs);
+ *   B) "data" method — columns are learned from the data itself: text that starts (or ends) at the same x-position
+ *      on many lines is one column. Needed for ERP/Excel reports printed in a tiny font where columns are only one
+ *      space apart and the headings are centred over wide columns (e.g. the ALLI HNB "Bank OD Management" report). */
 async function readPdf(buf){
  if(!window.pdfjsLib)throw new Error('The PDF reader did not load. Check the internet connection and reload the page.');
- pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ if(pdfjsLib.GlobalWorkerOptions&&!pdfjsLib.GlobalWorkerOptions.workerSrc)pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise;
  const PUA=/[-]/g; // icon glyphs some ERPs print inside the page (they stick to numbers otherwise)
  const lines=[];let chars=0;
  for(let p=1;p<=pdf.numPages;p++){
   const page=await pdf.getPage(p);const tc=await page.getTextContent();
-  const items=tc.items.map(it=>({s:String(it.str||'').replace(PUA,'').trim(),x:it.transform[4],y:it.transform[5],w:it.width||String(it.str||'').length*4})).filter(it=>it.s);
+  const items=tc.items.map(it=>{const raw=String(it.str||'').replace(PUA,'');return{raw,s:raw.trim(),x:it.transform[4],y:it.transform[5],w:it.width||raw.length*4,h:Math.abs(it.transform[3])||Math.abs(it.transform[0])||8};});
   chars+=sum(items,i=>i.s.length);
   const pl=[];
-  for(const it of items.sort((a,b)=>b.y-a.y)){let L=pl.find(l=>Math.abs(l.y-it.y)<3);if(!L){L={y:it.y,items:[]};pl.push(L);}L.items.push(it);}
+  for(const it of items.filter(i=>i.raw).sort((a,b)=>b.y-a.y)){const tol=Math.min(3,Math.max(1,it.h*0.5));let L=pl.find(l=>Math.abs(l.y-it.y)<tol);if(!L){L={y:it.y,items:[]};pl.push(L);}L.items.push(it);}
   pl.sort((a,b)=>b.y-a.y);
-  for(const L of pl){L.items.sort((a,b)=>a.x-b.x);const cells=[];
-   for(const it of L.items){const last=cells[cells.length-1];
-    if(last&&it.x-last.x2<4){last.s+=(it.x-last.x2>0.8?' ':'')+it.s;last.x2=Math.max(last.x2,it.x+it.w);}else cells.push({s:it.s,x:it.x,x2:it.x+it.w});}
-   lines.push({page:p,y:L.y,cells});}
+  for(const L of pl){L.items.sort((a,b)=>a.x-b.x);
+   const loose=[],tight=[];let sep=false;
+   for(const it of L.items){
+    if(!it.s){if(it.w>=0.25*it.h)sep=true;continue;}                      // a printed space between two cells
+    const a=loose[loose.length-1];
+    if(a&&it.x-a.x2<4){a.s+=(it.x-a.x2>0.8?' ':'')+it.s;a.x2=Math.max(a.x2,it.x+it.w);}else loose.push({s:it.s,x:it.x,x2:it.x+it.w});
+    const b=tight[tight.length-1];
+    if(b&&!sep&&it.x-b.x2<0.35*it.h&&it.x-b.x2>-0.1*it.h&&Math.abs(it.h-b.h)<=0.06*it.h){b.s+=(it.x-b.x2>0.15*it.h?' ':'')+it.s;b.x2=Math.max(b.x2,it.x+it.w);}else tight.push({s:it.s,x:it.x,x2:it.x+it.w,h:it.h});
+    sep=false;}
+   if(loose.length)lines.push({page:p,y:L.y,cells:loose,pieces:tight,h:sum(L.items,i=>i.h)/L.items.length});}
  }
  if(chars<60)throw new Error('This PDF has no readable text — it is probably a scanned image. Export it from the ERP / online banking as PDF, Excel or CSV instead of scanning.');
  const rowsRaw=lines.map(l=>l.cells.map(c=>c.s));
  const h=detectHeader(rowsRaw);
  if(!h)return{rows:rowsRaw,preText:rowsRaw.slice(0,20).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:false};
+ const preText=rowsRaw.slice(0,h.idx+1).map(r=>r.join(' ')).join('\n');
  const H=lines[h.idx].cells;const sig=l=>l.cells.map(c=>c.s).join('|');const hdrText=sig(lines[h.idx]);
- // Every text piece goes to the nearest header column (overlap for text, right edge for numbers).
- const align=cells=>{const row=H.map(()=>'');for(const c of cells){const num=isAmountText(c.s);let bj=0,bd=Infinity;
+ const hdrY={};lines.forEach((l,i)=>{if(i>=h.idx&&sig(l)===hdrText&&hdrY[l.page]==null)hdrY[l.page]=l.y;});
+ const body=lines.filter((L,i)=>i>h.idx&&sig(L)!==hdrText&&!(hdrY[L.page]!=null&&L.y>hdrY[L.page]+1)&&!PDF_FOOT_RX.test(L.cells.map(c=>c.s).join(' ')));
+ // A) nearest heading
+ const alignA=L=>{const row=H.map(()=>'');for(const c of L.cells){const num=isAmountText(c.s);let bj=0,bd=Infinity;
   H.forEach((hc,j)=>{const ov=Math.min(c.x2,hc.x2)-Math.max(c.x,hc.x);const d=ov>0?-ov:(num?Math.abs(c.x2-hc.x2):Math.abs(c.x-hc.x));if(d<bd){bd=d;bj=j;}});
   row[bj]=row[bj]?row[bj]+' '+c.s:c.s;}return row;};
- const hdrY={};lines.forEach((l,i)=>{if(i>=h.idx&&sig(l)===hdrText&&hdrY[l.page]==null)hdrY[l.page]=l.y;});
+ const cands=[{name:'A',rows:pdfRows(body,alignA,h,H)}];
+ const alignB=pdfDataColumns(body,H);
+ if(alignB)cands.push({name:'B',rows:pdfRows(body,alignB,h,H)});
+ // Use whichever reading gives more good transactions (ties keep the heading method).
+ let best=null;
+ for(const c of cands){const d=detectHeader(c.rows);let score=-1e9;
+  if(d){const ex=extract(c.rows,d.idx,validateMap(c.rows,d.idx,d.map),'AUTO');const f=finalize(ex,preText,'auto');
+   score=f.out.length*2-f.issues.length*3-f.breaks.length+(f.recon!=null&&Math.abs(f.recon)<0.51?10:0);}
+  c.score=score;if(!best||score>best.score)best=c;}
+ return{rows:best.rows,preText,kind:'pdf',pdfAligned:true,pdfMethod:best.name};
+}
+/** Learns the columns from the data lines. Returns an aligner (line → one cell per heading) or null. */
+function pdfDataColumns(body,H){
+ const n=body.length;if(n<4||H.length<2)return null;
+ const minN=Math.max(3,Math.ceil(n*0.04)),TOL=0.8;
+ const clusters=vals=>{const v=[...vals].sort((a,b)=>a.v-b.v),out=[];let c=null;
+  for(const x of v){if(c&&x.v-c.last<=0.6){c.items.push(x);c.last=x.v;}else{c={items:[x],last:x.v};out.push(c);}}
+  return out.map(c=>{const ls=new Set(c.items.map(i=>i.l));const s=c.items.map(i=>i.v).sort((a,b)=>a-b);return{v:s[s.length>>1],n:ls.size};}).filter(c=>c.n>=minN);};
+ const Ls=[],Rs=[];body.forEach((L,l)=>L.pieces.forEach(p=>{Ls.push({v:p.x,l});Rs.push({v:p.x2,l});}));
+ const aL=clusters(Ls),aR=clusters(Rs);const A=[...aL.map(a=>({...a,side:'L'})),...aR.map(a=>({...a,side:'R'}))];
+ if(A.length<2)return null;
+ const near=(side,v)=>{let bi=-1,bd=TOL;A.forEach((a,i)=>{if(a.side===side&&Math.abs(a.v-v)<=bd){bd=Math.abs(a.v-v);bi=i;}});return bi;};
+ const par=A.map((_,i)=>i);const find=i=>par[i]===i?i:(par[i]=find(par[i]));
+ const pairs={};const tag=[];
+ body.forEach((L,l)=>L.pieces.forEach((p,k)=>{const la=near('L',p.x),ra=near('R',p.x2);tag.push({l,k,p,la,ra});if(la>=0&&ra>=0){const key=la+'_'+ra;pairs[key]=(pairs[key]||0)+1;}}));
+ for(const[key,c]of Object.entries(pairs))if(c>=2){const[a,b]=key.split('_').map(Number);par[find(a)]=find(b);} // seen together on 2+ lines = same column
+ const groups={};
+ for(const t of tag){const a=t.la>=0?t.la:t.ra;if(a<0)continue;const g=find(a);(groups[g]||(groups[g]={xs:[],x2s:[]})).xs.push(t.p.x);groups[g].x2s.push(t.p.x2);}
+ const q=(arr,f)=>{const s=[...arr].sort((a,b)=>a-b);return s[Math.min(s.length-1,Math.floor(f*(s.length-1)))];};
+ let G=Object.entries(groups).map(([id,g])=>({ids:[+id],x:q(g.xs,0.25),x2:q(g.x2s,0.75)}));
+ // Groups that sit on top of each other are one column (e.g. 1-digit and 2-digit dates).
+ G.sort((a,b)=>a.x-b.x);
+ for(let i=0;i<G.length-1;i++){const a=G[i],b=G[i+1];const ov=Math.min(a.x2,b.x2)-Math.max(a.x,b.x),mn=Math.min(a.x2-a.x,b.x2-b.x);
+  if(ov>0&&ov>=0.6*Math.max(mn,0.5)){a.ids.push(...b.ids);a.x=Math.min(a.x,b.x);a.x2=Math.max(a.x2,b.x2);G.splice(i+1,1);i--;}}
+ if(G.length<2)return null;
+ const gOf={};G.forEach((g,gi)=>g.ids.forEach(id=>{gOf[id]=gi;}));
+ // Map columns to headings, keeping left-to-right order (dynamic programming).
+ const dist=(g,hc)=>{const ov=Math.min(g.x2,hc.x2)-Math.max(g.x,hc.x);return ov>=0?0:-ov;};
+ const NG=G.length,NH=H.length,PEN=25;const dp=Array.from({length:NG},()=>Array(NH).fill(Infinity)),bk=Array.from({length:NG},()=>Array(NH).fill(-1));
+ for(let j=0;j<NH;j++)dp[0][j]=dist(G[0],H[j]);
+ for(let i=1;i<NG;i++)for(let j=0;j<NH;j++){const c=dist(G[i],H[j]);for(let k=0;k<=j;k++){const v=dp[i-1][k]+c+(k===j?PEN:0);if(v<dp[i][j]){dp[i][j]=v;bk[i][j]=k;}}}
+ let j=dp[NG-1].indexOf(Math.min(...dp[NG-1]));const hOf=Array(NG);for(let i=NG-1;i>=0;i--){hOf[i]=j;j=bk[i][j];}
+ const pieceHeading=p=>{let a=near('L',p.x);if(a<0)a=near('R',p.x2);
+  if(a>=0&&gOf[find(a)]!=null)return hOf[gOf[find(a)]];
+  let bi=0,bd=Infinity;G.forEach((g,gi)=>{const d=dist({x:p.x,x2:p.x2},g)-Math.max(0,Math.min(p.x2,g.x2)-Math.max(p.x,g.x));if(d<bd){bd=d;bi=gi;}});return hOf[bi];};
+ return L=>{const row=H.map(()=>'');for(const p of L.pieces){const j=pieceHeading(p);row[j]=row[j]?row[j]+' '+p.s:p.s;}return row;};
+}
+/** Turns aligned PDF lines into rows: joins date lines with amounts printed slightly apart, and wrapped descriptions. */
+function pdfRows(body,align,h,H){
  const dateCol=h.map.date;const amtCols=['dr','cr','amt','bal'].map(k=>h.map[k]).filter(v=>v!=null);
- const L2=[];
- for(let i=h.idx+1;i<lines.length;i++){const L=lines[i];
-  if(sig(L)===hdrText)continue;                                  // header repeated on each page
-  if(hdrY[L.page]!=null&&L.y>hdrY[L.page]+1)continue;              // page titles above that page's header
-  if(PDF_FOOT_RX.test(L.cells.map(c=>c.s).join(' ')))continue;     // footers
-  const row=align(L.cells);const dv=row[dateCol];
-  const isA=!!(parseDate(dv,'DMY')||parseDate(dv,'MDY'));
-  L2.push({page:L.page,y:L.y,row,k:isA?'A':amtCols.some(j=>isAmountText(row[j]))?'O':'F'});
- }
- // A date line and its amounts printed a few points apart are one line.
- for(let i=0;i<L2.length-1;i++){const a=L2[i],b=L2[i+1];if(a.page!==b.page||Math.abs(a.y-b.y)>5)continue;
+ const pitches=[];for(let i=1;i<body.length;i++)if(body[i].page===body[i-1].page){const g=body[i-1].y-body[i].y;if(g>0)pitches.push(g);}
+ pitches.sort((a,b)=>a-b);const pitch=pitches.length?pitches[pitches.length>>1]:12;const JOIN=Math.min(5,pitch*0.7);
+ const L2=body.map(L=>{const row=align(L);const dv=row[dateCol];const isA=!!(parseDate(dv,'DMY')||parseDate(dv,'MDY'));
+  return{page:L.page,y:L.y,row,k:isA?'A':amtCols.some(j=>isAmountText(row[j]))?'O':'F'};});
+ for(let i=0;i<L2.length-1;i++){const a=L2[i],b=L2[i+1];if(a.page!==b.page||Math.abs(a.y-b.y)>JOIN)continue;
   const has=x=>amtCols.some(j=>isAmountText(x.row[j]));
   if((a.k==='A'&&!has(a)&&b.k==='O')||(b.k==='A'&&!has(b)&&a.k==='O')){const A=a.k==='A'?a:b,O=A===a?b:a;A.row=A.row.map((v,j)=>v||O.row[j]);L2.splice(L2.indexOf(O),1);i--;}}
- // Wrapped descriptions: text-only lines (F) belong to the nearest dated line (A) in the same block.
  const gaps=[];for(let i=1;i<L2.length;i++)if(L2[i].page===L2[i-1].page){const g=L2[i-1].y-L2[i].y;if(g>0&&g<80)gaps.push(g);}
  const TH=gapThreshold(gaps);const owner=new Map();let cl=[],lastA=null;
  const flush=()=>{if(!cl.length)return;const as=cl.filter(x=>x.k==='A');
@@ -352,7 +415,7 @@ async function readPdf(buf){
   if(x.k==='A'&&parts.has(x)){const all=[x,...parts.get(x)].sort((a,b)=>a.page-b.page||b.y-a.y);
    rows.push(x.row.map((v,j)=>keep.has(j)?v:all.map(l=>l.row[j]).filter(Boolean).join(' ').replace(/\s+/g,' ').trim()));}
   else rows.push(x.row);}
- return{rows,preText:rowsRaw.slice(0,h.idx+1).map(r=>r.join(' ')).join('\n'),kind:'pdf',pdfAligned:true};
+ return rows;
 }
 function readSheet(name,buf){
  if(!window.XLSX)throw new Error('The spreadsheet reader did not load. Check the internet connection and reload the page.');
@@ -375,7 +438,7 @@ function extract(rows,hIdx,map,orderPref){
  const get=(r,f)=>map[f]!=null&&map[f]!==''?(r[map[f]]??''):'';
  const order=detectOrder(rows.slice(hIdx+1,hIdx+400).map(r=>get(r,'date')),orderPref);
  const hdrSig=hIdx>=0?rows[hIdx].map(String).join('|'):null;
- const out=[],issues=[];let opening=null,closing=null,ctl=null;
+ const out=[],issues=[],empty=[],skipped=[];let opening=null,closing=null,ctl=null;
  for(let i=hIdx+1;i<rows.length;i++){
   const r=rows[i]||[];if(!r.some(c=>String(c).trim()))continue;
   if(hdrSig&&r.map(String).join('|')===hdrSig)continue;
@@ -401,14 +464,22 @@ function extract(rows,hIdx,map,orderPref){
    issues.push({row:i+1,msg:'Amount found but the date is missing or unreadable',text:r.join(' | ')});continue;
   }
   if(bad)issues.push({row:i+1,msg:'Amount could not be read',text:r.join(' | ')});
-  if(!dr&&!cr)continue;
+  const chg=map.chg!=null?Math.abs(parseAmount(get(r,'chg'))||0):0;
+  const stv=String(get(r,'status')).trim().toUpperCase();
+  if(/CANCEL|VOID|REVERS|DELETED|REJECT/.test(stv)){skipped.push({row:i+1,date:d,desc,status:stv});continue;}
+  const planned=/PLAN|PEND|DRAFT|EXPECT|FORECAST|ESTIM|SCHED|HOLD/.test(stv);
+  if(!dr&&!cr&&!chg){empty.push({row:i+1,date:d,desc});continue;}
   if(dr&&cr)issues.push({row:i+1,msg:'Row has both a debit and a credit',text:desc});
-  let chq=digits(get(r,'chq'));const ref=String(get(r,'ref')??'').trim();
+  const acct=String(get(r,'acct')??'').trim();
+  let chq=digits(get(r,'chq'));let ref=String(get(r,'ref')??'').trim();
+  if(chq&&chq.length<4){if(!ref)ref=acct;chq='';} // a serial like 0,1,2… is a line number, not a cheque number
+  if(!ref&&acct)ref=acct;
   if(!chq){const m=desc.toUpperCase().match(/\b(?:CHQ|CHEQUE|CHK|CHECK)\b[^0-9]{0,12}(\d{5,8})\b/);if(m)chq=m[1];}
   if(!chq&&/^\d{6,8}$/.test(ref)&&/CHQ|CHEQUE|CHECK|CHK/i.test(desc))chq=ref; // ERP: cheque number kept in Reference
-  out.push({date:d,desc,dr:round2(dr),cr:round2(cr),bal:balV,chq,ref,row:i+1});
+  if(dr||cr)out.push({date:d,desc,dr:round2(dr),cr:round2(cr),bal:chg?null:balV,chq,ref,row:i+1,planned});
+  if(chg)out.push({date:d,desc:'Other charges – '+desc,dr:round2(chg),cr:0,bal:balV,chq:'',ref,row:i+1,planned,chgLine:true});
  }
- return{out,opening,closing,issues,order,ctl};
+ return{out,opening,closing,issues,order,ctl,empty,skipped,hasStatus:map.status!=null};
 }
 function detectPeriod(text,order){
  const D='(\\d{1,2}[\\/\\-.]\\d{1,2}[\\/\\-.]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}[ \\-][A-Za-z]{3,9}[ \\-,]+\\d{2,4})';
@@ -417,13 +488,13 @@ function detectPeriod(text,order){
  return a&&b&&a<=b?{from:a,to:b}:null;
 }
 function detectAccNo(text){const m=String(text).match(/(?:a\/c|acc(?:oun)?t?)\s*(?:no|number|#)?\.?\s*[:\-]?\s*([0-9][0-9\- ]{5,22}[0-9])/i);if(m)return digits(m[1]);
- const m2=String(text).match(/(?:^|[^\d])(\d{10,16})(?!\d)/);return m2?m2[1]:'';}
+ const all=[...String(text).matchAll(/(?:^|[^\d])(\d{10,16})(?!\d)/g)].map(x=>x[1]).filter(n=>!(n.length===13&&/^1[5-9]/.test(n))&&!(n.length===10&&/^1[5-9]/.test(n)));return all[0]||'';}
 function guessBank(text){const B=[['commercial bank','Commercial Bank'],['hatton national','HNB'],['hnb','HNB'],['sampath','Sampath Bank'],['bank of ceylon','Bank of Ceylon'],['boc','Bank of Ceylon'],["people's bank",'People\'s Bank'],['peoples bank','People\'s Bank'],['seylan','Seylan Bank'],['ndb','NDB'],['dfcc','DFCC'],['nations trust','Nations Trust Bank'],['pan asia','Pan Asia Bank'],['union bank','Union Bank'],['amana','Amana Bank'],['cargills bank','Cargills Bank'],['hsbc','HSBC'],['standard chartered','Standard Chartered']];const t=String(text).toLowerCase();const f=B.find(([k])=>t.includes(k));return f?f[1]:'';}
 
 /** Orders rows, works out the layout (bank statement or company ledger), checks balances and totals.
  *  orient: 'auto' | 'bank' (Debit = money out) | 'ledger' (Debit = money in, e.g. ERP bank ledger / cash book). */
 const LEDGER_RX=/ledger|cash ?book|current assets?|general ledger|\bgl\b|trial balance/i;
-function finalize(ex,preText,orient='auto'){
+function finalize(ex,preText,orient='auto',opts={}){
  let{out,opening,closing}=ex;out=out.map(t=>({...t}));const notes=[];const issues=[...ex.issues];
  if(out.length>2){let asc=0,desc=0;for(let i=1;i<out.length;i++){if(out[i].date>out[i-1].date)asc++;else if(out[i].date<out[i-1].date)desc++;}
   if(desc>asc){out.reverse();notes.push('The file was listed newest-first; it has been put in date order.');}}
@@ -452,12 +523,35 @@ function finalize(ex,preText,orient='auto'){
  const breaks=[];let prev=opening;
  for(const t of out){if(t.bal!=null&&prev!=null&&Math.abs(prev+t.cr-t.dr-t.bal)>0.51)breaks.push({row:t.row,date:t.date,desc:t.desc,expected:round2(prev+t.cr-t.dr),shown:t.bal});prev=t.bal!=null?t.bal:(prev!=null?prev+t.cr-t.dr:null);}
  const cr=round2(sum(out,t=>t.cr)),dr=round2(sum(out,t=>t.dr));
- const recon=opening!=null&&closing!=null?round2(opening+cr-dr-closing):null;
- const dates=out.map(t=>t.date).sort();
- let from=dates[0]||null,to=dates[dates.length-1]||null;
- const per=detectPeriod(preText,ex.order);
- if(per&&from&&per.from<=from&&per.to>=to&&daysBetween(per.from,per.to)<=93){from=per.from;to=per.to;}
- return{out,opening,closing,cr,dr,recon,breaks,notes,from,to,hasBal,issues,order:ex.order,source:swap?'ledger':'bank'};
+ const recon=opening!=null&&closing!=null?round2(opening+cr-dr-closing):null; // checked on the whole file, in the file's own order
+ // Dates typed wrongly in the ERP (e.g. 13-Jul-26 between 10-Oct and 15-Oct rows): use the same day in the neighbours' month.
+ const edits=opts.dates||{},fixes=[];
+ out.forEach(t=>{if(edits[t.row]){t.origDate=t.date;t.date=edits[t.row];t.dateFixed='manual';}});
+ if(out.length>=8)for(let i=0;i<out.length;i++){const t=out[i];if(t.dateFixed)continue;
+  let p=null,n=null;for(let k=i-1;k>=0;k--)if(!out[k].dateFixed||out[k].dateFixed==='manual'){p=out[k].date;break;}
+  for(let k=i+1;k<out.length;k++){n=out[k].date;break;}
+  if(!p||!n||Math.abs(daysBetween(p,n))>45||Math.abs(daysBetween(p,t.date))<=60||Math.abs(daysBetween(n,t.date))<=60)continue;
+  const day=+t.date.slice(8),lo=p<n?p:n,hi=p<n?n:p;
+  const ok=[p,n].map(x=>mkDate(+x.slice(0,4),+x.slice(5,7),day)).filter(c=>c&&c>=addDays(lo,-7)&&c<=addDays(hi,7)).sort((a,b)=>Math.abs(daysBetween(p,a))-Math.abs(daysBetween(p,b)));
+  if(!ok.length)continue;fixes.push({row:t.row,desc:t.desc,from:t.date,to:ok[0]});t.origDate=t.date;t.date=ok[0];t.dateFixed='auto';}
+ // Rows not in date order: the printed running balance follows the file order, not the calendar.
+ let disorder=0;for(let i=1;i<out.length;i++)if(out[i].date<out[i-1].date)disorder++;
+ if(disorder&&hasBal){out.forEach(t=>{t.fileBal=t.bal;t.bal=null;});
+  notes.push(`${disorder} row${disorder>1?'s are':' is'} not in date order. The file still reconciles in its own order; daily balances have been re-calculated in date order.`);}
+ // Entries dated after the position date (post-dated cheques, planned deposits) or marked Planned are not in the bank yet.
+ const today=todayIso();const cutoff=opts.cutoff||(out.some(t=>t.date>today)?today:null);
+ const future=out.filter(t=>t.planned||(cutoff&&t.date>cutoff)),actual=out.filter(t=>!future.includes(t));
+ const book=!!(future.length||disorder||ex.hasStatus||swap);
+ let closingAct=closing;
+ if(future.length){closingAct=opening!=null?round2(opening+sum(actual,t=>t.cr-t.dr)):null;
+  const n=future.length,o=future.filter(t=>t.dr).length;
+  notes.push(`${n} entr${n>1?'ies are':'y is'} dated after ${dmy(cutoff)}${future.some(t=>t.planned)?' or marked planned':''} (${o} payment${o===1?'':'s'}, ${n-o} deposit${n-o===1?'':'s'}). ${n>1?'They are':'It is'} not in the bank yet, so ${n>1?'they go':'it goes'} to Upcoming items for the forecast — not into the actual balance.`);}
+ const dates=actual.map(t=>t.date).sort();
+ let from=dates[0]||null,to=future.length?cutoff:(dates[dates.length-1]||null);
+ if(!future.length){const per=detectPeriod(preText,ex.order);if(per&&from&&per.from<=from&&per.to>=to&&daysBetween(per.from,per.to)<=93){from=per.from;to=per.to;}}
+ if(from&&to&&from>to)from=to;
+ return{out:actual,future,opening,closing:closingAct,fileClosing:closing,cr:round2(sum(actual,t=>t.cr)),dr:round2(sum(actual,t=>t.dr)),fileCr:cr,fileDr:dr,recon,breaks,notes,from,to,hasBal,issues,
+  order:ex.order,source:swap?'ledger':'bank',book,cutoff,fixes,disorder,empty:ex.empty||[],skipped:ex.skipped||[]};
 }
 const normDesc=s=>String(s).toUpperCase().replace(/[^A-Z0-9]/g,'');
 const txKey=(acc,t)=>[acc,t.date,(+t.dr).toFixed(2),(+t.cr).toFixed(2),normDesc(t.desc).slice(0,40),t.chq||'',t.ref||'',t.bal!=null?(+t.bal).toFixed(2):''].join('|');
@@ -521,10 +615,13 @@ function derive(){
  const stById=Object.fromEntries(S.statements.map(s=>[s.id,s]));
  for(const a of S.accounts){
   const tx=S.txns.filter(t=>t.acc===a.id).sort(txSort);const pts=[];
-  for(const s of S.statements.filter(s=>s.acc===a.id))if(s.opening!=null)pts.push({date:addDays(s.from,-1),bal:s.opening,o:0});
-  let prev=null,prevStmt=null;
-  for(const t of tx){const s=stById[t.stmt];const base=(prevStmt!==t.stmt&&s&&s.opening!=null)?s.opening:prev;
-   const rb=t.bal!=null?t.bal:round2((base??0)+t.cr-t.dr);t.rb=rb;prev=rb;prevStmt=t.stmt;pts.push({date:t.date,bal:rb,o:1});}
+  // A statement's opening balance is used only where it starts a new period; inside a period already covered
+  // by another file the running balance simply continues (prevents jumps when files overlap).
+  const fresh=new Set();let maxTo='';
+  for(const s of S.statements.filter(s=>s.acc===a.id).sort((x,y)=>x.from<y.from?-1:1)){if(s.opening!=null&&s.from>maxTo){fresh.add(s.id);pts.push({date:addDays(s.from,-1),bal:s.opening,o:0});}if(s.to>maxTo)maxTo=s.to;}
+  let prev=null,prevStmt=null,prevDate='';
+  for(const t of tx){const s=stById[t.stmt];const start=prevStmt!==t.stmt&&s&&s.opening!=null&&fresh.has(s.id)&&(prev==null||s.from>prevDate);const base=start?s.opening:prev;
+   const rb=t.bal!=null?t.bal:round2((base??0)+t.cr-t.dr);t.rb=rb;prev=rb;prevStmt=t.stmt;prevDate=t.date;pts.push({date:t.date,bal:rb,o:1});}
   pts.sort((x,y)=>x.date<y.date?-1:x.date>y.date?1:x.o-y.o);
   S.points[a.id]=pts;
   const ends=S.statements.filter(s=>s.acc===a.id).map(s=>s.to).concat(tx.map(t=>t.date)).sort();
@@ -641,7 +738,9 @@ const dday=s=>s?WD[toD(s).getDay()]+' '+dmy(s):'–';
 function chqTiming(p,start){
  const today=todayIso();
  if(p.kind==='CHQ_IN'){const from=[p.date,start||today,today].sort()[2];const dep=p.depDate||nextBankDay(from);return{dep,eff:addWork(dep,+S.settings.clearDays||0)};}
- const base=[p.date,p.holdTo||'',start||''].sort()[2];return{eff:addWork(base,+S.settings.presentDays||0)};
+ const pd=+S.settings.presentDays||0,s0=start||today;
+ if(p.holdTo&&p.holdTo>p.date)return{eff:addWork(p.holdTo<s0?s0:p.holdTo,p.holdTo<s0?0:pd)};
+ const eff=addWork(p.date,pd);return{eff:eff<s0?nextWork(s0):eff}; // a cheque past its date can be presented any day now
 }
 /** Customers who have had a cheque returned (from bank data or cheques marked returned). */
 function riskyParties(){const set=new Set(),byChq={};const n=x=>String(x||'').replace(/^0+/,'');
@@ -660,7 +759,7 @@ function forecast(ids,{horizon=60,baseline=false,stress=false}={}){
    return true;})
   .map(p=>{const k=PLAN_KINDS[p.kind]||PLAN_KINDS.EXPENSE;let eff,dep=null,late=p.date<start;
    if(p.kind==='CHQ_IN'||p.kind==='CHQ_OUT'){const t=chqTiming(p,start);eff=t.eff<start?start:t.eff;dep=t.dep||null;late=false;}
-   else eff=p.date<start?start:p.date;
+   else{eff=p.clear?addWork(p.date,+S.settings.clearDays||0):p.date;if(eff<start)eff=start;}
    return{...p,amt:k.sign*p.amount,type:k.type,kindLabel:k.label,eff,dep,late};})
   .filter(e=>e.eff<=end).sort((a,b)=>a.eff<b.eff?-1:a.eff>b.eff?1:b.amt-a.amt);
  let base=0,baseInfo=null;
@@ -726,14 +825,41 @@ function recoveryPlan(f){
  return{cap,r0,steps,final:r,windows};
 }
 /** Earliest date a new issued cheque can hit the account without making the worst OD point any worse. */
-function safeDateFor(f,amount){
- const cap=round2(f.limit*(1-(+S.settings.bufferPct||0)/100));const P=ev=>project(ev,f.startBal,f.start,f.end,cap,f.base);
- const base=P(f.events),today=todayIso(),pd=+S.settings.presentDays||0;let best=null;
- for(let D=nextWork(f.start>today?f.start:today);D<=addDays(f.end,-7);D=nextWork(addDays(D,1))){
-  const r=P([...f.events,{id:'_new',amt:-amount,eff:D}]);const inc=r.peakExcess-base.peakExcess;const cd=subWork(D,pd)<today?today:subWork(D,pd);
-  if(inc<0.5)return{debit:D,chqDate:cd,r,base,ok:r.peakExcess<0.5,cap};
-  if(!best||inc<best.inc)best={debit:D,chqDate:cd,r,inc};}
- return{debit:null,best,base,cap};
+/** SAFE CHEQUE DATE — exact check.
+ *  A cheque dated C reaches the account on D = C + presentation days (working days; weekends/holidays skipped).
+ *  From D onwards it lowers the balance on EVERY later day, so it is safe only if, on every day from D to the end
+ *  of the projection, projected OD + amount stays within the safe level (limit − buffer).
+ *  With headroom(d) = balance(d) + safe level, the most we can pay with debit day D is min(headroom from D onwards).
+ *  Only days covered by known upcoming items are trusted: beyond the last item the projection is flat and would
+ *  look safer than reality. */
+function chequeCapacity(acc,opts={}){
+ const ids=[acc];const st=S.settings;const hz=Math.max(+st.horizon||60,120);
+ const f=forecast(ids,{horizon:hz,baseline:st.baseline});if(!f)return{err:'nodata'};if(!f.limit)return{err:'nolimit',f};
+ const cap=round2(f.limit*(1-(+st.bufferPct||0)/100)),pd=+st.presentDays||0,today=todayIso();
+ const n=f.days.length,head=f.days.map(d=>d.bal+cap),sm=Array(n),smAt=Array(n);
+ for(let i=n-1;i>=0;i--){if(i===n-1||head[i]<=sm[i+1]+0.5){sm[i]=head[i];smAt[i]=f.days[i].date;}else{sm[i]=sm[i+1];smAt[i]=smAt[i+1];}}
+ const lastItem=f.events.length?f.events[f.events.length-1].eff:f.start;
+ const cover=st.baseline?f.end:(lastItem>f.start?lastItem:f.start);
+ const idx=d=>d<f.start?0:daysBetween(f.start,d);
+ const notBefore=opts.notBefore&&opts.notBefore>today?opts.notBefore:today;
+ const dates=[];
+ for(let C=notBefore;C<=cover;C=addDays(C,1)){let D=addWork(C,pd);if(D<f.start)D=nextWork(f.start);if(D>cover)break;const i=idx(D);if(i>=n)break;
+  dates.push({chq:C,debit:D,max:Math.max(0,Math.floor(sm[i]/1000)*1000),worst:smAt[i],worstHead:sm[i],day:f.days[i]});}
+ const bad=f.days.filter(d=>d.date<=cover&&d.bal+cap<0);
+ return{f,cap,cover,dates,bad,firstBad:bad[0]||null,lastBad:bad[bad.length-1]||null};
+}
+function safeDateFor(acc,amount,opts={}){
+ const c=chequeCapacity(acc,opts);if(c.err)return c;
+ const hit=c.dates.find(x=>x.max>=amount);
+ // Split suggestion: tranches on the earliest dates that have room (each one lowers every later day).
+ let parts=null;
+ if(!hit){parts=[];let left=amount,used=0,last=null;
+  for(const x of c.dates){if(parts.length>=4||left<=0)break;const room=Math.floor((x.worstHead-used)/1000)*1000;if(room<=0)continue;
+   if(room>=left){parts.push({...x,amt:left});used+=left;left=0;break;}
+   if(room>=Math.max(50000,amount*0.2)&&(!last||daysBetween(last,x.chq)>=7)){parts.push({...x,amt:room});used+=room;left-=room;last=x.chq;}}
+  if(!parts.length){const best=c.dates.reduce((b,x)=>!b||x.max>b.max?x:b,null);if(best&&best.max>0){parts.push({...best,amt:best.max});left=amount-best.max;}}
+  if(left>0)parts.left=left;}
+ return{...c,amount,hit,parts};
 }
 function stepText(s){const e=s.e,who=esc(e.party||e.kindLabel),amt=rs(Math.abs(e.amt));
  if(s.stage==='flex')return`Pay ${who} ${amt} on <b>${dday(s.to)}</b> instead of ${dday(s.from)}.`;
@@ -801,15 +927,18 @@ const csvCell=v=>{const s=String(v??'');return/[",\n]/.test(s)?'"'+s.replace(/"/
 function txCsv(list){const h=['Account','Date','Description','Cheque','Reference','Debit','Credit','Balance','Category','Group','Customer/Supplier','Data type'];
  return '﻿'+[h,...list.map(t=>[accName(t.acc),t.date,t.desc,t.chq,t.ref,t.dr||'',t.cr||'',t.rb??t.bal??'',t.cat,GROUP_LABEL[GROUP[t.cat]]||'',t.party,'ACTUAL'])].map(r=>r.map(csvCell).join(',')).join('\r\n');}
 
-const PAGES=[['dash','Dashboard'],['upload','Upload statement'],['review','Needs review'],['txns','Transactions'],['reports','Monthly report'],['plans','Commitments'],['planner','Cheque planner'],['forecast','Forecast & OD'],['actions','Action center'],['cheques','Cheque register'],['history','Upload history'],['settings','Settings']];
+const PAGES=[['dash','Dashboard'],['upload','Upload'],['cheques','Cheques'],['forecast','Forecast'],['txns','Transactions'],['reports','Report'],['settings','Settings']];
+// Old page names still work (links in alerts, bookmarks) and open the page that now holds that section.
+const ALIAS={review:'txns',plans:'forecast',planner:'cheques',actions:'dash',history:'upload',register:'cheques'};
 function renderNav(){const nr=S.txns.filter(t=>t.cat==='Needs Review').length;
- $('#nav').innerHTML=PAGES.map(([k,l])=>`<a href="#${k}" class="${S.ui.page===k?'on':''}">${l}${k==='review'&&nr?`<span class="cnt">${nr}</span>`:''}</a>`).join('');}
+ $('#nav').innerHTML=PAGES.map(([k,l])=>`<a href="#${k}" class="${S.ui.page===k?'on':''}">${l}${k==='txns'&&nr?`<span class="cnt" title="need a category">${nr}</span>`:''}</a>`).join('');}
 function renderAccSel(){$('#accSel').innerHTML=`<option value="ALL">All accounts</option>`+S.accounts.map(a=>`<option value="${a.id}" ${S.ui.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('');
  $('#orgName').textContent=S.settings.org?S.settings.org+' — Bank & OD Control':'Bank & OD Control';}
 function render(){renderNav();renderAccSel();Object.keys(CH).forEach(k=>{CH[k].destroy();delete CH[k];});
  const y=window.scrollY;$('#main').innerHTML=(VIEWS[S.ui.page]||VIEWS.dash)();AFTER.splice(0).forEach(f=>f());if(render.keep)window.scrollTo(0,y);render.keep=false;}
 const rerender=()=>{render.keep=true;render();};
-function route(){const h=(location.hash.slice(1)||'dash').split('?')[0];S.ui.page=PAGES.some(p=>p[0]===h)?h:'dash';render();window.scrollTo(0,0);}
+function route(){let h=(location.hash.slice(1)||'dash').split('?')[0];const sec=ALIAS[h]?h:null;h=ALIAS[h]||h;S.ui.page=PAGES.some(p=>p[0]===h)?h:'dash';render();
+ const el=sec&&document.getElementById('sec-'+sec);if(el){el.scrollIntoView({block:'start'});if(el.tagName==='DETAILS')el.open=true;}else window.scrollTo(0,0);}
 
 /* ---- Dashboard ---- */
 function welcome(){return`<h1>Welcome</h1><div class="card"><h2>Turn the monthly bank statement into management information</h2>
@@ -861,8 +990,8 @@ VIEWS.dash=()=>{
 VIEWS.upload=()=>{
  const step=!IMP?1:IMP.rows.some(r=>r.include&&r.cat==='Needs Review')?5:6;
  const names=['Upload','Read','Duplicates','Classify','Review','Confirm'];
- let h=`<h1>${IMP&&IMP.replaceStmt?'Reprocess statement':'Upload monthly bank statement'}</h1><div class="steps">${names.map((n,i)=>`<span class="${i+1===step?'on':i+1<step?'done':''}">${i+1}. ${n}</span>`).join('')}</div>`;
- if(!IMP){h+=`<label class="drop" id="drop" style="display:block;cursor:pointer"><p style="font-size:16px"><b>Choose or drop the statement file</b></p><input type="file" id="fileIn" accept=".pdf,.csv,.txt,.xls,.xlsx" data-chg="file" style="margin:8px auto"><p class="muted small">PDF (text-based), CSV or Excel. Best accuracy: CSV/Excel downloaded from online banking.<br>The file is read on this computer — nothing is sent to any server.</p></label>`;
+ let h=`<h1>${IMP&&IMP.replaceStmt?'Reprocess file':'Upload bank statement or ERP bank book'}</h1>`;
+ if(!IMP){h+=`<label class="drop" id="drop" style="display:block;cursor:pointer"><p style="font-size:16px"><b>Choose or drop the statement file</b></p><input type="file" id="fileIn" accept=".pdf,.csv,.txt,.xls,.xlsx" data-chg="file" style="margin:8px auto"><p class="muted small">PDF (text-based), CSV or Excel — bank statements and the ERP bank book (incl. post-dated cheques).<br>The file is read on this computer — nothing is sent to any server.</p></label>`;
   AFTER.push(bindDrop);return h;}
  return h+previewHtml();
 };
@@ -882,7 +1011,7 @@ async function handleFile(file,replaceStmt){
   if(replaceStmt&&replaceStmt.orient)orient=replaceStmt.orient;
   if(replaceStmt&&replaceStmt.map&&replaceStmt.hIdx!=null&&replaceStmt.hIdx<src.rows.length){hIdx=replaceStmt.hIdx;map={...replaceStmt.map};}
   map=validateMap(src.rows,hIdx,map);
-  IMP={src,hIdx,map,orient,order:S.settings.dateOrder,showMap:!det||(isPdf&&!src.pdfAligned),saveMap:true,override:false,acc:replaceStmt?replaceStmt.acc:null,newAcc:null,replaceStmt:replaceStmt?replaceStmt.id:null,manualOpening:null};
+  IMP={src,hIdx,map,orient,order:S.settings.dateOrder,showMap:!det||(isPdf&&!src.pdfAligned),saveMap:true,override:false,acc:replaceStmt?replaceStmt.acc:null,newAcc:null,replaceStmt:replaceStmt?replaceStmt.id:null,manualOpening:null,cutoff:replaceStmt&&replaceStmt.cutoff||null,dates:{},futKinds:{},replaceOld:null};
   recompute(true);
   if(location.hash!=='#upload')location.hash='#upload';else render();
   if(!IMP.fin.out.length)toast('No transactions were found automatically. Use “Map columns” to show which column is which.',7000);
@@ -890,61 +1019,87 @@ async function handleFile(file,replaceStmt){
 }
 function recompute(first){
  const I=IMP;const ex=extract(I.src.rows,I.hIdx,I.map,I.order);
- I.fin=finalize(ex,I.src.preText+'\n'+I.src.fileName,I.orient||'auto');
+ I.fin=finalize(ex,I.src.preText+'\n'+I.src.fileName,I.orient||'auto',{cutoff:I.cutoff,dates:I.dates});
  if(I.manualOpening!=null&&I.fin.opening==null){I.fin.opening=I.manualOpening;if(!I.fin.hasBal)I.fin.closing=round2(I.manualOpening+I.fin.cr-I.fin.dr);}
  if(first&&I.acc==null){const text=I.src.preText+' '+I.src.fileName;const num=detectAccNo(text);I.detNo=num;
   const same=(a,b)=>a&&b&&(a===b||(a.length>=8&&b.length>=8&&(a.endsWith(b)||b.endsWith(a))));
   const m=num?S.accounts.find(a=>same(digits(a.number),num)):null;
-  if(m)I.acc=m.id;else if(!num&&S.accounts.length)I.acc=S.accounts[0].id;else I.acc='NEW';
-  I.newAcc={name:'',bank:guessBank(text),number:num||'',odLimit:''};}
+  // ERP reports carry the bank in a column ("HNB 3656"), not in the heading.
+  const refBank=guessBank([...I.fin.out,...I.fin.future].slice(0,40).map(t=>' '+String(t.ref||'').split(/\s/)[0]+' ').join(' '));const bank=guessBank(text)||refBank;
+  const byBank=!num&&bank?S.accounts.filter(a=>a.bank===bank||String(a.name).toUpperCase().includes(bank.toUpperCase())):[];
+  if(m)I.acc=m.id;else if(byBank.length===1)I.acc=byBank[0].id;else if(!num&&S.accounts.length===1)I.acc=S.accounts[0].id;else I.acc='NEW';
+  I.newAcc={name:bank&&I.acc==='NEW'?bank+' – Current A/C':'',bank,number:num||'',odLimit:''};}
  if(!I.newAcc)I.newAcc={name:'',bank:'',number:'',odLimit:''};
  buildRows();
 }
+/** Upcoming items in a ledger file become: issued cheques, fixed payments (salary, EPF, OD interest…) or expected deposits. */
+const AUTO_DEBIT=new Set(['Salary','OD Interest','Bank Charges','Other Expenses','Loan','Electricity','Rent']);
+function futKind(t){if(t.cr>t.dr)return'COLLECTION';return AUTO_DEBIT.has(classify(t).cat)?'EXPENSE':'CHQ_OUT';}
+/** "Clean Poly Packaging (Pvt) Ltd-428,436" / "WAYAMBA (Inv.0156)" → the party's name. */
+const partyName=d=>String(d||'').replace(/\s*[-–]?\s*\(\s*inv[^)]*\)?.*$/i,'').replace(/[\s\-–,\d]+$/,'').replace(/\s+/g,' ').trim()||String(d||'').trim();
+const FUT_KINDS=[['CHQ_OUT','Issued cheque'],['EXPENSE','Fixed payment (auto debit)'],['COLLECTION','Expected deposit'],['SKIP','Ignore']];
 function buildRows(){
- const I=IMP;const acc=I.acc;const old=Object.fromEntries((I.rows||[]).map(r=>[r.key+'#'+r.row,r]));
- const existing=new Set(S.txns.filter(t=>t.acc===acc&&t.stmt!==I.replaceStmt).map(t=>t.key));
- const prevManual=I.replaceStmt?Object.fromEntries(S.txns.filter(t=>t.stmt===I.replaceStmt&&t.src==='manual').map(t=>[t.key,t])):{};
+ const I=IMP;const acc=I.acc,f=I.fin;const old=Object.fromEntries((I.rows||[]).map(r=>[r.key+'#'+r.row,r]));
+ I.overlap=f.from?S.statements.filter(s=>s.acc===acc&&s.id!==I.replaceStmt&&s.from<=f.to&&s.to>=f.from):[];
+ // An ERP export usually repeats the full history, so it replaces the earlier export it covers.
+ if(I.replaceOld==null)I.replaceOld=!!(f.book&&I.overlap.length&&I.overlap.every(s=>s.from>=f.from));
+ const olds=new Set([I.replaceStmt,...(I.replaceOld?I.overlap.map(s=>s.id):[])].filter(Boolean));I.olds=olds;
+ const kOf=t=>txKey(acc,f.book?{...t,bal:null}:t);
+ const existing=new Set(S.txns.filter(t=>t.acc===acc&&!olds.has(t.stmt)).map(t=>t.key));
+ const prevManual=Object.fromEntries(S.txns.filter(t=>olds.has(t.stmt)&&t.src==='manual').map(t=>[txKey(acc,{...t,bal:f.book?null:t.bal}),t]));
  const seen={};
- I.rows=I.fin.out.map(t=>{const key=txKey(acc,t);const p=old[key+'#'+t.row];const c=classify(t);const pm=prevManual[key];
+ I.rows=f.out.map(t=>{const key=kOf(t);const p=old[key+'#'+t.row];let c=classify(t);const pm=prevManual[key];
+  if(f.book&&c.cat==='Needs Review'&&t.dr>t.cr)c={cat:'Supplier Payment',party:partyName(t.desc),src:'auto'};
   seen[key]=(seen[key]||0)+1;const dup=existing.has(key);
   return{...t,key,dup,include:p?p.include:!dup,cat:p&&p.manual?p.cat:pm?pm.cat:c.cat,party:p&&p.manual?p.party:pm?pm.party:c.party,src:c.src,manual:p?p.manual:!!pm,review:p?p.review:c.cat==='Needs Review',kw:p?p.kw:suggestKw(t.desc),remember:p?p.remember:true};});
  I.rows.forEach(r=>r.dupInFile=seen[r.key]>1);
- const f=I.fin;I.overlap=f.from?S.statements.filter(s=>s.acc===acc&&s.id!==I.replaceStmt&&s.from<=f.to&&s.to>=f.from):[];
+ I.futs=f.future.map(t=>({...t,kind:I.futKinds[t.row]||futKind(t)}));
 }
 function previewHtml(){
- const I=IMP,f=I.fin,rows=I.rows;const inc=rows.filter(r=>r.include),dups=rows.filter(r=>r.dup).length;
+ const I=IMP,f=I.fin,rows=I.rows,futs=I.futs||[];const inc=rows.filter(r=>r.include),dups=rows.filter(r=>r.dup).length;
  const rev=rows.map((r,i)=>[r,i]).filter(([r])=>r.include&&r.review);const open=rev.filter(([r])=>r.cat==='Needs Review').length;
  const recOk=f.recon==null?null:Math.abs(f.recon)<0.51;
  const accOk=I.acc&&(I.acc!=='NEW'||String(I.newAcc.name).trim());
- const can=inc.length>0&&(recOk!==false||I.override)&&accOk;
+ const can=(inc.length>0||futs.length>0)&&(recOk!==false||I.override)&&accOk;
  const acctSel=`<select data-chg="impAcc">${S.accounts.map(a=>`<option value="${a.id}" ${I.acc===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}<option value="NEW" ${I.acc==='NEW'?'selected':''}>+ New account…</option></select>`;
- let h=`<div class="card"><div class="row sb"><h2>Import preview ${badge('ACTUAL')}</h2><span class="muted small">Nothing is saved until you press Confirm import.</span></div>
+ const fut=futs.filter(x=>x.kind!=='SKIP'),futOut=sum(fut.filter(x=>x.kind!=='COLLECTION'),x=>x.dr),futIn=sum(fut.filter(x=>x.kind==='COLLECTION'),x=>x.cr);
+ let h=`<div class="card"><div class="row sb"><h2>Check before saving</h2><span class="muted small">Nothing is saved until you press Save.</span></div>
  <div class="grid">
- ${kpi('File',esc(I.src.fileName),'',I.src.kind.toUpperCase()+(I.detNo?' · A/C '+esc(I.detNo):'')+'<br>'+(f.source==='ledger'?'Company ledger layout (Dr = in)':'Bank statement layout (Dr = out)'))}
+ ${kpi('File',esc(I.src.fileName),'',I.src.kind.toUpperCase()+(f.book?' · ERP bank book':' · bank statement')+(f.source==='ledger'?' (Dr = in)':''))}
  <div class="card kpi"><div class="l">Account</div><div style="margin-top:6px">${acctSel}</div></div>
- ${kpi('Period',f.from?`${dmy(f.from)} – ${dmy(f.to)}`:'–','',f.from?monthLabel(monthKey(f.to)):'')}
- ${kpi('Transactions',String(rows.length),'',`${inc.length} to import · ${dups} duplicate${dups===1?'':'s'}`)}
- ${kpi('Total credits',rs(f.cr),'','')}${kpi('Total debits',rs(f.dr),'','')}
- ${kpi('Opening balance',rs(f.opening),'',f.opening==null?'not found':'',f.opening<0)}${kpi('Closing balance',rs(f.closing),'','',f.closing<0)}
+ ${f.book&&(futs.length||f.cutoff)?`<div class="card kpi"><div class="l">Bank position as of</div><div style="margin-top:6px"><input type="date" data-chg="cutoff" value="${f.cutoff||f.to||''}"></div><div class="s">later entries = upcoming</div></div>`:kpi('Period',f.from?`${dmy(f.from)} – ${dmy(f.to)}`:'–','','')}
+ ${kpi('Opening balance',rs(f.opening),'',f.opening==null?'not found':'',f.opening<0)}
+ ${kpi(f.book&&futs.length?'Balance on '+dmy(f.to):'Closing balance',rs(f.closing),'ACTUAL',`${inc.length} entr${inc.length===1?'y':'ies'} in the bank${dups?` · ${dups} already saved`:''}`,f.closing<0)}
+ ${futs.length?kpi('Upcoming',rs(futIn-futOut),'EXPECTED',`${fut.filter(x=>x.kind!=='COLLECTION').length} out · ${fut.filter(x=>x.kind==='COLLECTION').length} in`,futIn-futOut<0):''}
  </div>`;
  if(I.acc==='NEW')h+=`<div class="card"><h2>New account</h2><div class="form">
-  <label>Account name *<input data-chg="newAcc" data-f="name" value="${esc(I.newAcc.name)}" placeholder="e.g. Commercial Bank – Current A/C"></label>
+  <label>Account name *<input data-chg="newAcc" data-f="name" value="${esc(I.newAcc.name)}" placeholder="e.g. HNB – Current A/C"></label>
   <label>Bank<input data-chg="newAcc" data-f="bank" value="${esc(I.newAcc.bank)}"></label>
   <label>Account number<input data-chg="newAcc" data-f="number" value="${esc(I.newAcc.number)}"></label>
-  <label>Approved OD limit (Rs.)<input data-chg="newAcc" data-f="odLimit" type="number" min="0" value="${esc(I.newAcc.odLimit)}" placeholder="0 if none"></label></div></div>`;
- if(recOk===true)h+=`<div class="al ok"><div class="t">✓ Statement reconciles</div><div class="small">Opening ${rs(f.opening)} + credits ${rs(f.cr)} − debits ${rs(f.dr)} = closing ${rs(f.closing)}.</div></div>`;
- else if(recOk===false)h+=`<div class="al high"><div class="t">⚠️ STATEMENT RECONCILIATION ERROR</div><div>Imported transactions do not reconcile with the statement closing balance. Difference: <b>${rs(f.recon)}</b>.</div>
-  ${f.breaks.length?`<div class="small" style="margin-top:6px">Running balance first breaks at: ${f.breaks.slice(0,5).map(b=>`line ${b.row} (${dmy(b.date)} ${esc(b.desc.slice(0,30))}: expected ${rs(b.expected)}, statement shows ${rs(b.shown)})`).join('; ')}${f.breaks.length>5?` … and ${f.breaks.length-5} more`:''}.</div>`:''}
-  <div class="small" style="margin-top:6px">Usual causes: a column mapped wrongly (debit/credit swapped), rows missed from a PDF, or a statement page missing. Use <b>Map columns</b> to check.</div>
-  <label class="small" style="display:flex;gap:6px;margin-top:8px"><input type="checkbox" data-chg="override" ${I.override?'checked':''}> I have checked this. Import anyway and mark the statement <b>UNRECONCILED</b>.</label></div>`;
- else h+=`<div class="al att"><div class="t">No balance figures found — reconciliation is not possible</div><div class="small">Enter the opening balance printed on the statement so the running balance and OD figures are right (use minus for overdrawn):</div><div class="row" style="margin-top:6px"><input type="number" step="0.01" data-chg="manOpen" value="${I.manualOpening??''}" placeholder="e.g. -2500000"></div></div>`;
- if(I.overlap.length)h+=`<div class="al att"><div class="t">This period has already been imported</div><div class="small">${I.overlap.map(s=>`${monthLabel(monthKey(s.to))} statement (${esc(s.file)}, ${dmy(s.from)}–${dmy(s.to)})`).join('; ')} is already in the system for this account. ${dups} duplicate transaction${dups===1?' is':'s are'} excluded; ${inc.length} new one${inc.length===1?'':'s'} will be imported.</div></div>`;
+  <label>Approved OD limit (Rs.) *<input data-chg="newAcc" data-f="odLimit" type="number" min="0" value="${esc(I.newAcc.odLimit)}" placeholder="needed for OD checks"></label></div></div>`;
+ if(recOk===true)h+=`<div class="al ok"><div class="t">✓ File reconciles to the cent</div><div class="small">Opening ${rs(f.opening)} + credits ${rs(f.fileCr)} − debits ${rs(f.fileDr)} = ${rs(f.fileClosing)}${futs.length?` (file end, incl. upcoming)`:''}.</div></div>`;
+ else if(recOk===false)h+=`<div class="al high"><div class="t">⚠️ The file does not reconcile</div><div>Opening + credits − debits differs from the closing balance by <b>${rs(f.recon)}</b>.</div>
+  ${f.breaks.length?`<div class="small" style="margin-top:6px">Running balance first breaks at: ${f.breaks.slice(0,5).map(b=>`line ${b.row} (${dmy(b.date)} ${esc(b.desc.slice(0,30))}: expected ${rs(b.expected)}, file shows ${rs(b.shown)})`).join('; ')}${f.breaks.length>5?` … and ${f.breaks.length-5} more`:''}.</div>`:''}
+  <div class="small" style="margin-top:6px">Usual causes: debit/credit columns swapped, rows missed from a PDF, or a page missing. Use <b>Map columns</b> to check.</div>
+  <label class="small" style="display:flex;gap:6px;margin-top:8px"><input type="checkbox" data-chg="override" ${I.override?'checked':''}> I have checked this. Save anyway and mark it <b>UNRECONCILED</b>.</label></div>`;
+ else h+=`<div class="al att"><div class="t">No balance figures found — reconciliation is not possible</div><div class="small">Enter the opening balance printed on the statement (minus for overdrawn):</div><div class="row" style="margin-top:6px"><input type="number" step="0.01" data-chg="manOpen" value="${I.manualOpening??''}" placeholder="e.g. -2500000"></div></div>`;
+ if(f.fixes.length||rows.some(r=>r.dateFixed==='manual')||futs.some(r=>r.dateFixed==='manual')){const all=[...rows,...futs].filter(r=>r.dateFixed);
+  h+=`<div class="al att"><div class="t">${all.length} date${all.length>1?'s look':' looks'} mistyped in the file — corrected, please check</div><table class="small" style="margin-top:6px"><tbody>${all.map(r=>`<tr><td>Line ${r.row}</td><td>${esc(r.desc)}</td><td class="n">${fmt(r.dr||r.cr,2)}</td><td>file says <b>${dmy(r.origDate)}</b></td><td>use <input type="date" data-chg="fixDate" data-row="${r.row}" value="${r.date}"></td></tr>`).join('')}</tbody></table><div class="small" style="margin-top:4px">Please correct ${all.length>1?'them':'it'} in the ERP too.</div></div>`;}
+ if(I.overlap.length)h+=`<div class="al att"><div class="t">This period was already imported for this account</div><div class="small">${I.overlap.map(s=>`${esc(s.file)} (${dmy(s.from)}–${dmy(s.to)})`).join('; ')}</div>
+  <label class="small" style="display:flex;gap:6px;margin-top:6px"><input type="checkbox" data-chg="replaceOld" ${I.replaceOld?'checked':''}> Replace the earlier import with this file${f.book?' (recommended — each ERP export repeats the full history)':''}</label>
+  ${I.replaceOld?'':`<div class="small">${dups} duplicate${dups===1?' is':'s are'} skipped; ${inc.length} new entr${inc.length===1?'y':'ies'} will be added.</div>`}</div>`;
  const same=rows.filter(r=>r.dupInFile).length;
- if(same)h+=`<div class="al att"><div class="small"><b>${same} rows are identical within this file</b> (same date, amount, description and balance). They are kept — check them in the list below.</div></div>`;
+ if(same)h+=`<div class="al att small"><b>${same} rows are identical within this file</b> (same date, amount and description). They are kept — check them below.</div>`;
  if(f.issues.length)h+=`<div class="al high"><div class="t">${f.issues.length} line${f.issues.length>1?'s':''} could not be read</div><div class="small">${f.issues.slice(0,8).map(i=>`Line ${i.row}: ${i.msg} — <span class="muted">${esc(String(i.text).slice(0,90))}</span>`).join('<br>')}${f.issues.length>8?'<br>…':''}</div></div>`;
+ if(f.empty.length)h+=`<div class="al info small">${f.empty.length} line${f.empty.length>1?'s have':' has'} a date but no amount and ${f.empty.length>1?'were':'was'} skipped: ${f.empty.slice(0,6).map(e=>`${dmy(e.date)} ${esc(e.desc)}`).join(', ')}.</div>`;
+ if(f.skipped.length)h+=`<div class="al info small">${f.skipped.length} cancelled / void line${f.skipped.length>1?'s were':' was'} skipped.</div>`;
  if(f.notes.length)h+=f.notes.map(n=>`<div class="al info small">${esc(n)}</div>`).join('');
- h+=`<div class="row" style="margin-top:10px"><button class="p" data-act="confirmImport" ${can?'':'disabled'}>Confirm import (${inc.length})</button><button data-act="cancelImport">Cancel</button><button data-act="toggleMap">${I.showMap?'Hide column mapping':'Map columns'}</button>
- ${!accOk?'<span class="small neg">Enter a name for the new account.</span>':''}${recOk===false&&!I.override?'<span class="small neg">Resolve or acknowledge the reconciliation error first.</span>':''}${open?`<span class="small warn">${open} still need a category (you can also do this after importing).</span>`:''}</div></div>`;
+ h+=`<div class="row" style="margin-top:10px"><button class="p" data-act="confirmImport" ${can?'':'disabled'}>Save${inc.length?` ${inc.length} bank entr${inc.length===1?'y':'ies'}`:''}${fut.length?` + ${fut.length} upcoming`:''}</button><button data-act="cancelImport">Cancel</button><button data-act="toggleMap">${I.showMap?'Hide column mapping':'Map columns'}</button>
+ ${!accOk?'<span class="small neg">Enter a name for the new account.</span>':''}${recOk===false&&!I.override?'<span class="small neg">Resolve or acknowledge the reconciliation error first.</span>':''}${open?`<span class="small warn">${open} need a category (can also be done later).</span>`:''}</div></div>`;
+ if(futs.length)h+=`<div class="card"><h2>Upcoming — not in the bank yet (${futs.length}) ${badge('EXPECTED')}</h2><p class="muted small" style="margin-top:0">Post-dated cheques and planned deposits from the file. They feed the forecast, the OD warnings and the safe cheque date. Saving replaces upcoming items from earlier imports of this account.</p>
+ <div class="tw" style="max-height:340px"><table><thead><tr><th>Date</th><th>Party</th><th class="n">Out</th><th class="n">In</th><th>Treat as</th></tr></thead><tbody>
+ ${futs.map(r=>`<tr class="${r.kind==='SKIP'?'dim':''}"><td>${dmy(r.date)}${r.dateFixed?' <span class="b b-EXPECTED">DATE FIXED</span>':''}</td><td>${esc(r.desc)}</td><td class="n">${r.dr?fmt(r.dr,2):''}</td><td class="n">${r.cr?fmt(r.cr,2):''}</td><td><select data-chg="futKind" data-row="${r.row}">${FUT_KINDS.map(([v,l])=>`<option value="${v}" ${r.kind===v?'selected':''}>${l}</option>`).join('')}</select></td></tr>`).join('')}
+ <tr class="tot"><td colspan="2">Total</td><td class="n">${fmt(futOut,2)}</td><td class="n">${fmt(futIn,2)}</td><td></td></tr></tbody></table></div></div>`;
  if(I.showMap)h+=mapHtml();
  if(rev.length)h+=`<div class="card"><h2>Step 5 · Needs review (${open} of ${rev.length} open)</h2><p class="muted small">Pick a category. Tick “remember” and the keyword becomes a rule, so next month these are classified automatically.</p>
  <div class="tw"><table><thead><tr><th>Date</th><th>Description</th><th class="n">In</th><th class="n">Out</th><th>Category</th><th>Customer / supplier</th><th>Remember keyword</th></tr></thead><tbody>
@@ -970,7 +1125,11 @@ function mapHtml(){
  <div class="tw" style="margin-top:10px"><table><thead><tr>${Array.from({length:n},(_,j)=>`<th><select class="map-sel" data-chg="mapCol" data-j="${j}">${FIELDS.map(([v,l])=>`<option value="${v}" ${fieldOf(j)===v?'selected':''}>${l}</option>`).join('')}</select><div class="muted" style="text-transform:none">${I.hIdx>=0?esc(raw[I.hIdx][j]??''):'col '+(j+1)}</div></th>`).join('')}</tr></thead>
  <tbody>${sample.map(r=>`<tr>${Array.from({length:n},(_,j)=>`<td>${esc(r[j]??'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`;
 }
-CHG.impAcc=el=>{IMP.acc=el.value;buildRows();rerender();};
+CHG.impAcc=el=>{IMP.acc=el.value;IMP.replaceOld=null;buildRows();rerender();};
+CHG.cutoff=el=>{IMP.cutoff=el.value||null;recompute();rerender();};
+CHG.fixDate=el=>{if(el.value)IMP.dates[+el.dataset.row]=el.value;recompute();rerender();};
+CHG.futKind=el=>{IMP.futKinds[+el.dataset.row]=el.value;buildRows();rerender();};
+CHG.replaceOld=el=>{IMP.replaceOld=el.checked;buildRows();rerender();};
 CHG.newAcc=el=>{IMP.newAcc[el.dataset.f]=el.value;if(el.dataset.f==='name')rerender();};
 CHG.override=el=>{IMP.override=el.checked;rerender();};
 CHG.manOpen=el=>{IMP.manualOpening=el.value===''?null:+el.value;recompute();rerender();};
@@ -986,17 +1145,31 @@ CHG.saveMap=el=>{IMP.saveMap=el.checked;};
 CHG.mapCol=el=>{const j=+el.dataset.j,f=el.value;for(const k of Object.keys(IMP.map))if(IMP.map[k]===j||k===f)delete IMP.map[k];if(f)IMP.map[f]=j;recompute();rerender();};
 ACT.toggleMap=()=>{IMP.showMap=!IMP.showMap;rerender();};
 ACT.cancelImport=()=>{IMP=null;render();};
+/** Deletes statements (and their transactions and the upcoming items they created). */
+async function removeStatements(ids){
+ ids=[...ids].filter(Boolean);if(!ids.length)return;const set=new Set(ids);
+ const tIds=S.txns.filter(t=>set.has(t.stmt)).map(t=>t.id);await DB.delMany('txns',tIds);S.txns=S.txns.filter(t=>!set.has(t.stmt));
+ const pIds=S.plans.filter(p=>p.status==='open'&&set.has(p.fromStmt)).map(p=>p.id);await DB.delMany('plans',pIds);S.plans=S.plans.filter(p=>!pIds.includes(p.id));
+ await DB.delMany('statements',ids);S.statements=S.statements.filter(s=>!set.has(s.id));
+}
 ACT.confirmImport=async()=>{
  const I=IMP,f=I.fin;let accId=I.acc;
  if(accId==='NEW'){const a={id:uid(),name:I.newAcc.name.trim(),bank:I.newAcc.bank,number:I.newAcc.number,odLimit:+I.newAcc.odLimit||0};await DB.put('accounts',a);S.accounts.push(a);accId=a.id;}
  const old=I.replaceStmt?S.statements.find(s=>s.id===I.replaceStmt):null;
- if(old){const ids=S.txns.filter(t=>t.stmt===old.id).map(t=>t.id);await DB.delMany('txns',ids);S.txns=S.txns.filter(t=>t.stmt!==old.id);await DB.del('statements',old.id);S.statements=S.statements.filter(s=>s.id!==old.id);}
- const fileId=old&&old.fileId?old.fileId:uid();if(!(old&&old.fileId))await DB.put('files',{id:fileId,name:I.src.fileName,type:I.src.type,data:I.src.buf});
+ const olds=[...(I.olds||[])];const nOld=olds.filter(id=>id!==I.replaceStmt).length;
+ const keepFile=old&&old.fileId;await removeStatements(olds);
+ const fileId=keepFile?old.fileId:uid();if(!keepFile)await DB.put('files',{id:fileId,name:I.src.fileName,type:I.src.type,data:I.src.buf});
  const inc=I.rows.filter(r=>r.include);const stId=uid();
- const st={id:stId,acc:accId,file:I.src.fileName,fileId,kind:I.src.kind,from:f.from,to:f.to,opening:f.opening,closing:f.closing,cr:f.cr,dr:f.dr,count:I.rows.length,imported:inc.length,dups:I.rows.length-inc.length,
-  uploaded:old?old.uploaded:new Date().toISOString(),reprocessed:old?new Date().toISOString():null,recon:f.recon,
+ const st={id:stId,acc:accId,file:I.src.fileName,fileId,kind:I.src.kind,from:f.from,to:f.to,opening:f.opening,closing:f.closing,fileClosing:f.fileClosing,cr:f.cr,dr:f.dr,count:I.rows.length,imported:inc.length,dups:I.rows.length-inc.length,
+  uploaded:old?old.uploaded:new Date().toISOString(),reprocessed:old?new Date().toISOString():null,recon:f.recon,book:f.book,cutoff:I.cutoff||null,upcoming:(I.futs||[]).filter(x=>x.kind!=='SKIP').length,
   status:f.recon==null?'Imported – no balances to reconcile':Math.abs(f.recon)<0.51?'Imported':'Imported – UNRECONCILED',map:I.map,hIdx:I.hIdx,order:f.order,orient:I.orient||'auto',source:f.source};
- const tx=inc.map(r=>({id:uid(),acc:accId,stmt:stId,date:r.date,desc:r.desc,dr:r.dr,cr:r.cr,bal:r.bal,chq:r.chq,ref:r.ref,seq:r.row,cat:r.cat,party:r.party,src:r.manual?'manual':r.src,key:txKey(accId,r)}));
+ const tx=inc.map(r=>{const t={id:uid(),acc:accId,stmt:stId,date:r.date,desc:r.desc,dr:r.dr,cr:r.cr,bal:r.bal,chq:r.chq,ref:r.ref,seq:r.row,cat:r.cat,party:r.party,src:r.manual?'manual':r.src};t.key=txKey(accId,f.book?{...t,bal:null}:t);return t;});
+ // Upcoming items: the newest file is the latest truth, so earlier imported upcoming items of this account are replaced.
+ let plans=[];
+ if(f.book){const stale=S.plans.filter(p=>p.status==='open'&&p.acc===accId&&p.src==='import').map(p=>p.id);await DB.delMany('plans',stale);S.plans=S.plans.filter(p=>!stale.includes(p.id));
+  plans=(I.futs||[]).filter(x=>x.kind!=='SKIP').map(x=>({id:uid(),acc:accId,kind:x.kind,date:x.date,amount:round2(x.dr||x.cr),party:partyName(x.desc),chq:x.chq||'',ref:x.ref||'',bank:'',flexible:false,
+   note:'From '+I.src.fileName,status:'open',created:Date.now(),src:'import',fromStmt:stId,clear:x.kind==='COLLECTION'}));
+  if(plans.length)await DB.putMany('plans',plans);S.plans.push(...plans);}
  const newRules=[];
  inc.filter(r=>r.manual&&r.remember&&String(r.kw).trim()&&r.cat!=='Needs Review').forEach(r=>{const w=normWords(r.kw);if(!newRules.some(x=>x.words===w&&x.cat===r.cat))newRules.push({id:uid(),words:w,dir:r.cr>r.dr?'in':'out',cat:r.cat,party:r.party||'',builtin:false,created:Date.now()});});
  await DB.put('statements',st);await DB.putMany('txns',tx);if(newRules.length)await DB.putMany('rules',newRules);
@@ -1005,8 +1178,10 @@ ACT.confirmImport=async()=>{
  const closed=await matchChequePlans(tx);
  if(I.saveMap&&I.hIdx>=0){S.settings.mappings[headerSig(I.src.rows[I.hIdx])]={map:I.map,orient:I.orient||'auto'};await saveSettings();}
  derive();IMP=null;S.ui.rp={type:'month',key:monthKey(f.to)};
- toast(`${old?'Reprocessed':'Imported'} ${tx.length} transactions${more?`; ${more} older ones classified by your new rules`:''}${closed?`; ${closed} expected cheque${closed>1?'s':''} marked cleared`:''}.`,5000);
- location.hash='#reports';
+ toast(`Saved ${tx.length} bank entr${tx.length===1?'y':'ies'}${plans.length?` and ${plans.length} upcoming item${plans.length>1?'s':''}`:''}${nOld?` (replaced ${nOld} earlier import${nOld>1?'s':''})`:''}${more?`; ${more} older entries classified by your new rules`:''}${closed?`; ${closed} cheque${closed>1?'s':''} marked cleared`:''}.`,6000);
+ const acc=S.accounts.find(a=>a.id===accId);
+ location.hash=acc&&!acc.odLimit?'#settings':'#dash';
+ if(acc&&!acc.odLimit)setTimeout(()=>toast('Enter the approved OD limit for '+acc.name+' — OD checks and safe cheque dates need it.',7000),6200);
 };
 async function reapplyRules(all,stmtId){
  const ch=[];for(const t of S.txns){if(t.src==='manual')continue;if(stmtId&&t.stmt!==stmtId)continue;if(!all&&!stmtId&&t.cat!=='Needs Review')continue;
@@ -1245,21 +1420,16 @@ VIEWS.planner=()=>{
  const due=hand.filter(p=>p.date<=today&&p.date>=cut),stale=hand.filter(p=>p.date<cut),pdc=hand.filter(p=>p.date>today);
  const tm=p=>chqTiming(p,start);const holdCost=rate?sum(due,p=>p.amount*rate/100*daysBetween(p.date,today)/365):0;
  const rp=f&&f.limit?recoveryPlan(f):null;const dayOf=d=>f?f.days.find(x=>x.date===d):null;
- let h=`<h1>Cheque planner</h1><p class="muted" style="margin-top:-8px">Plans when to bank the cheques you hold and shows when your own cheques will hit the account, so the OD stays inside the limit. Cheques count in the forecast on the day the money actually moves.</p>
+ let h=`<h1>Cheque planner</h1><p class="muted" style="margin-top:-8px;display:none">Plans when to bank the cheques you hold and shows when your own cheques will hit the account, so the OD stays inside the limit. Cheques count in the forecast on the day the money actually moves.</p>
  <div class="grid">${kpi('Cheques in hand',rs(sum(hand,p=>p.amount)),'EXPECTED',`${hand.length} cheques · ${pdc.length} post-dated`)}
  ${kpi('Due — deposit now',rs(sum(due,p=>p.amount)),'EXPECTED',due.length?`${due.length} dated today or earlier${holdCost?` · holding cost so far ${rs(holdCost)}`:''}`:'nothing waiting',false,due.length?'warn':'')}
  ${kpi('Deposited, not cleared',rs(sum(dep,p=>p.amount)),'EXPECTED',`${dep.length} cheques`)}
  ${kpi('Our cheques not presented',rs(sum(cout,p=>p.amount)),'EXPECTED',`${cout.length} cheques`)}
  ${f&&f.limit?kpi('Lowest OD headroom',rs(f.limit+f.min.bal),'FORECAST','on '+dday(f.min.date),f.limit+f.min.bal<0):''}
  ${f&&f.limit?kpi('Limit status',f.breach?'Over '+dmy(f.breach.date):'Within limit','FORECAST',f.breach?'by '+rs(f.breach.excess):`next ${f.horizon} days`,!!f.breach):''}</div>
- <div class="card noprint"><div class="row sb"><h2>Assumptions</h2><span class="muted small">Holidays, OD rate, stale period: <a href="#settings">Settings</a></span></div><div class="form">
- <label>Deposited cheques clear after (working days)<input type="number" min="0" max="5" data-chg="set" data-f="clearDays" data-num="1" value="${st.clearDays}"></label>
- <label>Our cheques hit the account (working days after cheque date)<input type="number" min="0" max="10" data-chg="set" data-f="presentDays" data-num="1" value="${st.presentDays}"></label>
- <label>Safety buffer (% of OD limit kept free)<input type="number" min="0" max="50" data-chg="set" data-f="bufferPct" data-num="1" value="${st.bufferPct}"></label>
- <label>Horizon<select data-chg="hz">${[30,60,90,120].map(n=>`<option value="${n}" ${hz===n?'selected':''}>${n} days</option>`).join('')}</select></label>
- <div><div class="small muted" style="margin-bottom:4px">Bank visit days</div><div class="row">${[1,2,3,4,5,6].map(d=>`<label class="small" style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-chg="bankDay" data-d="${d}" ${bankDayList().includes(d)?'checked':''}>${WD[d]}</label>`).join('')}</div></div>
- <label class="ck"><input type="checkbox" data-chg="stress" ${S.ui.stress?'checked':''}> Stress test: assume cheques from customers who bounced before will bounce${risky.size?` (${risky.size} customer${risky.size>1?'s':''})`:''}</label></div>
- ${S.ui.stress&&f&&f.excluded.length?`<p class="small warn">Stress test on: ${f.excluded.length} cheque(s), ${rs(sum(f.excluded,p=>p.amount))}, left out of the projection.</p>`:''}</div>`;
+ <p class="small muted noprint">Assumptions: deposited cheques clear after ${st.clearDays} working day${st.clearDays==1?'':'s'} · our cheques hit the account ${st.presentDays} working day${st.presentDays==1?'':'s'} after their date · ${st.bufferPct}% of the limit kept free · bank days ${bankDayList().map(d=>WD[d]).join(', ')} — <a href="#settings">change in Settings</a>.
+ <label style="display:inline-flex;gap:4px;margin-left:6px"><input type="checkbox" data-chg="stress" ${S.ui.stress?'checked':''}> stress test (cheques from customers who bounced before will bounce${risky.size?`: ${risky.size}`:''})</label></p>
+ ${S.ui.stress&&f&&f.excluded.length?`<p class="small warn">Stress test on: ${f.excluded.length} cheque(s), ${rs(sum(f.excluded,p=>p.amount))}, left out of the projection.</p>`:''}`;
  if(!f)h+=`<div class="al att">Upload a bank statement first — the plan starts from the latest actual balance. You can already enter cheques below.</div>`;
  else{
   const groups={};hand.filter(p=>p.date>=cut).forEach(p=>{const t=tm(p);(groups[t.dep]||(groups[t.dep]={dep:t.dep,eff:t.eff,list:[]})).list.push(p);});
@@ -1296,14 +1466,6 @@ VIEWS.planner=()=>{
    const sb=!f.limit?'':d.od>f.limit?'<span class="b b-red">OVER LIMIT</span>':d.od>capL?'<span class="b b-EXPECTED">TIGHT</span>':'<span class="b b-ACTUAL">OK</span>';
    return`<tr><td>${dday(d.date)}</td><td class="n">${dp.length?fmt(sum(dp,p=>p.amount))+` <span class="muted small">(${dp.length})</span>`:''}</td><td class="n pos">${ci?fmt(ci):''}</td><td class="n neg">${co?fmt(co):''}</td><td class="n">${ot?(ot>0?'+':'')+fmt(ot):''}</td><td class="n ${d.bal<0?'neg':''}">${fmt(d.bal)}</td><td class="n ${hr!=null&&hr<0?'neg':''}">${hr!=null?fmt(hr):'–'}</td><td>${sb}</td></tr>`;}).join('')}</tbody></table></div>`:'<p class="muted">No movements in the horizon.</p>'}
    <div style="margin-top:12px">${forecastChart('pChart',ids,f,260,capL)}</div></div>`;}
- const sd=S.ui.sdc;
- h+=`<div class="card"><h2>When can we date a new cheque?</h2><p class="muted small" style="margin-top:0">Before writing a supplier cheque, find the earliest date it can carry without pushing the OD past the safe level.</p><div class="form">
- <label>Amount (Rs.)<input type="number" id="sdA" min="0" value="${sd?sd.amount:''}"></label><label>Pay to<input id="sdP" value="${esc(sd?sd.party:'')}"></label><label>Cheque no. (optional)<input id="sdC" value="${esc(sd?sd.chq:'')}"></label><div class="row"><button class="p" data-act="sdFind">Find safe date</button></div></div>`;
- if(sd&&f&&f.limit){const r=safeDateFor(f,sd.amount);
-  if(r.debit)h+=`<div class="al ${r.ok?'ok':'att'}" style="margin-top:10px"><div class="t">${r.ok?'🟢':'🟠'} Date the cheque ${dday(r.chqDate)} or later</div><div class="small">It would reach the account around ${dday(r.debit)}. ${r.ok?`Lowest headroom afterwards ${rs(f.limit+r.r.min.bal)} on ${dday(r.r.min.date)}.`:'This date adds nothing to the existing problem, but the projection is already above the safe level elsewhere — see the recovery plan.'}</div><div class="row" style="margin-top:6px"><button class="sm p" data-act="sdAdd" data-date="${r.chqDate}">Add as issued cheque dated ${dmy(r.chqDate)}</button></div></div>`;
-  else h+=`<div class="al high" style="margin-top:10px"><div class="t">No date in the next ${f.horizon} days is safe for ${rs(sd.amount)}</div><div class="small">The least harmful date is ${dday(r.best.chqDate)}, but it still adds ${rs(r.best.inc)} to the peak. Split the payment, or arrange funding first.</div></div>`;}
- else if(sd)h+=`<p class="small warn" style="margin-top:8px">Needs a bank statement and the OD limit to calculate.</p>`;
- h+=`</div>`;
  const e=S.ui.editChq?S.plans.find(p=>p.id===S.ui.editChq):null;
  h+=`<div class="card"><h2>${e?'Edit cheque':'Add cheque'}</h2><div class="form">
  <label>Type<select id="cqK"><option value="CHQ_IN" ${!e||e.kind==='CHQ_IN'?'selected':''}>Received (customer / others)</option><option value="CHQ_OUT" ${e&&e.kind==='CHQ_OUT'?'selected':''}>Issued by us</option></select></label>
@@ -1364,9 +1526,6 @@ ACT.chqSave=async()=>{const amt=+$('#cqA').value,date=$('#cqD').value;if(!date)r
  const p={...(e||{id:uid(),status:'open',created:Date.now(),flexible:false}),kind:$('#cqK').value,chq:digits($('#cqN').value),date,amount:round2(amt),party:$('#cqP').value.trim(),bank:$('#cqB').value.trim(),acc:$('#cqAc').value,note:$('#cqT').value.trim()};
  const n=x=>String(x||'').replace(/^0+/,'');if(!e&&p.chq&&S.plans.some(x=>x.kind===p.kind&&n(x.chq)===n(p.chq)&&Math.abs(x.amount-p.amount)<0.01))return toast('This cheque is already entered.');
  await DB.put('plans',p);if(e)Object.assign(e,p);else S.plans.push(p);S.ui.editChq=null;toast(e?'Saved.':'Cheque added.');rerender();};
-ACT.sdFind=()=>{const a=+$('#sdA').value;if(!(a>0))return toast('Enter the amount.');S.ui.sdc={amount:a,party:$('#sdP').value.trim(),chq:digits($('#sdC').value)};rerender();};
-ACT.sdAdd=async b=>{const sd=S.ui.sdc,acc=accIds()[0];if(!sd||!acc)return;const p={id:uid(),acc,kind:'CHQ_OUT',date:b.dataset.date,amount:round2(sd.amount),party:sd.party,chq:sd.chq,bank:'',flexible:false,note:'Dated with the Cheque planner',status:'open',created:Date.now()};
- await DB.put('plans',p);S.plans.push(p);S.ui.sdc=null;toast('Added to our issued cheques.');rerender();};
 ACT.applyStep=async b=>{const p=S.plans.find(x=>x.id===b.dataset.id);if(!p)return;const to=b.dataset.to,sg=b.dataset.stage,add=t=>p.note=(p.note?p.note+' · ':'')+t;
  if(sg==='flex'){add(`Moved from ${dmy(p.date)}`);p.date=to;}
  else if(sg==='hold'){p.holdTo=subWork(to,+S.settings.presentDays||0);add(`Payee agreed to present on/after ${dmy(p.holdTo)}`);}
@@ -1406,9 +1565,8 @@ VIEWS.history=()=>{const ids=accIds();const l=S.statements.filter(s=>ids.include
 ACT.hView=b=>{S.ui.tf={q:'',m:'',cat:'',stmt:b.dataset.id};location.hash='#txns';};
 ACT.hDl=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);const f=await DB.get('files',s.fileId);if(!f)return toast('Original file not stored.');download(f.name,new Blob([f.data],{type:f.type||'application/octet-stream'}));};
 ACT.hRe=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);const f=await DB.get('files',s.fileId);if(!f)return toast('Original file not stored.');await handleFile(new File([f.data],f.name,{type:f.type}),s);};
-ACT.hDel=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);if(!confirm(`Delete ${s.file} and its ${s.imported} transactions? This cannot be undone.`))return;
- const ids=S.txns.filter(t=>t.stmt===s.id).map(t=>t.id);await DB.delMany('txns',ids);await DB.del('statements',s.id);if(s.fileId)await DB.del('files',s.fileId);
- S.txns=S.txns.filter(t=>t.stmt!==s.id);S.statements=S.statements.filter(x=>x.id!==s.id);derive();toast('Deleted.');rerender();};
+ACT.hDel=async b=>{const s=S.statements.find(x=>x.id===b.dataset.id);if(!confirm(`Delete ${s.file}, its ${s.imported} entries${s.upcoming?` and ${s.upcoming} upcoming items`:''}? This cannot be undone.`))return;
+ const shared=S.statements.some(x=>x.id!==s.id&&x.fileId===s.fileId);await removeStatements([s.id]);if(s.fileId&&!shared)await DB.del('files',s.fileId);derive();toast('Deleted.');rerender();};
 
 /* ---- Settings ---- */
 VIEWS.settings=()=>{const st=S.settings;const ur=S.rules.filter(r=>!r.builtin).sort((a,b)=>(b.created||0)-(a.created||0)),br=S.rules.filter(r=>r.builtin).sort((a,b)=>a.ord-b.ord);
@@ -1427,7 +1585,8 @@ VIEWS.settings=()=>{const st=S.settings;const ur=S.rules.filter(r=>!r.builtin).s
  <label>Our cheques hit the account (working days after cheque date)<input type="number" min="0" max="10" data-chg="set" data-f="presentDays" data-num="1" value="${st.presentDays}"></label>
  <label>Safety buffer (% of OD limit kept free)<input type="number" min="0" max="50" data-chg="set" data-f="bufferPct" data-num="1" value="${st.bufferPct}"></label>
  <label>OD interest rate (% a year — for cost estimates)<input type="number" min="0" max="60" step="0.01" data-chg="set" data-f="odRate" data-num="1" value="${st.odRate}"></label>
- <label>Cheques go stale after (months)<input type="number" min="1" max="12" data-chg="set" data-f="staleMonths" data-num="1" value="${st.staleMonths}"></label></div>
+ <label>Cheques go stale after (months)<input type="number" min="1" max="12" data-chg="set" data-f="staleMonths" data-num="1" value="${st.staleMonths}"></label>
+ <div><div class="small muted" style="margin-bottom:4px">Days someone goes to the bank</div><div class="row">${[1,2,3,4,5,6].map(d=>`<label class="small" style="display:flex;gap:3px;align-items:center"><input type="checkbox" data-chg="bankDay" data-d="${d}" ${bankDayList().includes(d)?'checked':''}>${WD[d]}</label>`).join('')}</div></div></div>
  <label style="display:grid;gap:3px;font-size:12px;color:var(--mut);margin-top:10px">Bank & public holidays (no clearing) — dates separated by commas, e.g. 06/10/2026, 20/10/2026<textarea data-chg="set" data-f="holidays" rows="2">${esc(st.holidays)}</textarea></label></div>
  <div class="card"><h2>Classification rules</h2><p class="muted small" style="margin-top:0">If the description contains any of the keywords (comma-separated), the category and customer/supplier are set. Your rules are checked first, newest first, then the built-in rules.</p>
  <div class="form"><label>Keywords<input id="nrW" placeholder="e.g. KEELLS, JKH"></label><label>Money<select id="nrD"><option value="any">In or out</option><option value="in">In only</option><option value="out">Out only</option></select></label><label>Category<select id="nrC">${catOptions('Customer Collection')}</select></label><label>Customer / supplier<input id="nrP"></label><div class="row"><button class="p" data-act="addRule">Add rule</button><button data-act="rerun">Re-run rules on all transactions</button></div></div>
@@ -1518,6 +1677,53 @@ ACT.demo=async()=>{
  S.accounts.push(D.acc);S.statements.push(...D.stmts);S.txns.push(...txns);S.plans.push(...D.plans);derive();
  toast('Demo loaded: 6 months of statements, this month to date, and upcoming commitments.',4500);location.hash='#dash';render();
 };
+
+/* ---- Simplified pages (each combines older sections) ---- */
+const V0={...VIEWS};const noH1=html=>html.replace(/<h1>[\s\S]*?<\/h1>/,'');
+const sec=(id,html)=>`<div id="sec-${id}">${html}</div>`;
+VIEWS.dash=()=>{const ids=accIds();if(!S.txns.length)return V0.dash();const items=actionItems(ids);
+ return V0.dash().replace(/<div class="card"><div class="row sb"><h2>What should management do\?<\/h2>[\s\S]*?<\/div>\s*<div class="g2">/,
+  ()=>`<div class="card"><h2>What needs attention</h2>${items.slice(0,4).map(alertHtml).join('')}${items.length>4?`<details id="sec-actions"><summary>${items.length-4} more</summary>${items.slice(4).map(alertHtml).join('')}</details>`:''}</div><div class="g2">`);};
+VIEWS.upload=()=>IMP?V0.upload():V0.upload()+sec('history',`<h3>Uploaded files</h3>`+noH1(V0.history()));
+VIEWS.txns=()=>{const nr=S.txns.filter(t=>t.cat==='Needs Review'&&accIds().includes(t.acc)).length;
+ return(nr?sec('review',noH1(V0.review()).replace('<div class="card">',`<div class="card"><h2>${nr} entr${nr>1?'ies need':'y needs'} a category</h2>`)):'')+V0.txns();};
+VIEWS.forecast=()=>V0.forecast()+sec('plans',`<h3>Upcoming items (commitments)</h3>`+noH1(V0.plans()));
+VIEWS.cheques=()=>{const ids=accIds();
+ return`<h1>Cheques</h1>`+safeCardHtml(ids)+sec('planner',noH1(V0.planner()))+`<details class="card" id="sec-register"><summary>Cheque register — cleared, returned and pending</summary>${noH1(V0.cheques())}</details>`;};
+
+function safeCardHtml(ids){
+ const sd=S.ui.sdc||{};const accs=S.accounts;if(!accs.length)return'';
+ const acc=sd.acc&&accs.some(a=>a.id===sd.acc)?sd.acc:(ids.length===1?ids[0]:(accs.find(a=>a.odLimit)||accs[0]).id);
+ let h=`<div class="card" id="sec-safe"><h2>Safe date for a new cheque</h2><p class="muted small" style="margin-top:0">Before writing a cheque, find the earliest date it can carry so that the OD stays inside the safe level on <b>every</b> day after it reaches the account.</p>
+ <div class="form"><label>Account<select id="sdAcc">${accs.map(a=>`<option value="${a.id}" ${a.id===acc?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+ <label>Amount (Rs.)<input type="number" id="sdA" min="0" step="0.01" value="${sd.amount||''}"></label><label>Pay to<input id="sdP" value="${esc(sd.party||'')}"></label>
+ <label>Not before (optional)<input type="date" id="sdN" value="${sd.notBefore||''}"></label><div class="row"><button class="p" data-act="sdFind">Find safe date</button></div></div>`;
+ const cap=chequeCapacity(acc,{notBefore:sd.notBefore});
+ if(cap.err==='nodata')return h+`<p class="small warn">Upload a statement for this account first.</p></div>`;
+ if(cap.err==='nolimit')return h+`<p class="small warn">Enter the approved OD limit for this account in <a href="#settings">Settings</a>.</p></div>`;
+ const f=cap.f,lim=f.limit,buf=+S.settings.bufferPct||0;
+ if(sd.amount){const r=safeDateFor(acc,sd.amount,{notBefore:sd.notBefore});
+  if(r.hit){const x=r.hit;h+=`<div class="al ok" style="margin-top:10px"><div class="t">🟢 Date the cheque ${dday(x.chq)} or later</div>
+   <div class="small">It reaches the account about ${dday(x.debit)}. After that the tightest day is ${dday(x.worst)}, where ${rs(x.worstHead-sd.amount)} will still be free below the safe level (limit ${rs(lim)} − ${buf}% buffer = ${rs(cap.cap)} OD).</div>
+   ${daysBetween(x.debit,cap.cover)<14?`<div class="small warn" style="margin-top:4px">Only ${daysBetween(x.debit,cap.cover)} day${daysBetween(x.debit,cap.cover)===1?'':'s'} of known items after this date (to ${dmy(cap.cover)}). Salaries, EPF and other payments after that are not in the projection yet — check again after the next upload.</div>`:''}
+   <div class="row" style="margin-top:6px"><button class="sm p" data-act="sdAdd" data-date="${x.chq}" data-amt="${sd.amount}">Add as issued cheque dated ${dmy(x.chq)}</button></div></div>`;}
+  else{h+=`<div class="al high" style="margin-top:10px"><div class="t">No single date up to ${dmy(cap.cover)} has room for ${rs(sd.amount)}</div>`;
+   if(r.parts&&r.parts.length===1&&r.parts.left){const p=r.parts[0];h+=`<div class="small" style="margin-top:4px">The most this account can safely take is <b>${rs(p.amt)}</b> — a cheque dated <b>${dday(p.chq)}</b> or later (reaches the account ${dday(p.debit)}). The tightest day after it is ${dday(p.worst)}.</div>
+    <div class="small" style="margin-top:4px">The other ${rs(r.parts.left)} needs funding, a temporary OD increase, or moving other payments later.</div>`;}
+   else if(r.parts&&r.parts.length)h+=`<div class="small" style="margin-top:4px"><b>Pay it in parts:</b></div><table class="small"><tbody>${r.parts.map(p=>`<tr><td>Cheque dated <b>${dday(p.chq)}</b></td><td class="n">${rs(p.amt)}</td><td class="muted">reaches the account ${dday(p.debit)}</td></tr>`).join('')}</tbody></table>
+    ${r.parts.left?`<div class="small" style="margin-top:4px">Still ${rs(r.parts.left)} with no room before ${dmy(cap.cover)} — needs funding, a temporary OD increase or moving other payments.</div>`:''}`;
+   else h+=`<div class="small">There is no room at all: even without this cheque the projection is above the safe level${cap.firstBad?` between ${dday(cap.firstBad.date)} and ${dday(cap.lastBad.date)}`:''}. Fix that first — see the recovery plan below.</div>`;
+   h+=`</div>`;}}
+ if(cap.firstBad&&!(sd.amount&&!safeDateFor(acc,sd.amount,{notBefore:sd.notBefore}).hit))h+=`<div class="al att small" style="margin-top:8px">Even without a new cheque the projection goes past the safe level between ${dday(cap.firstBad.date)} and ${dday(cap.lastBad.date)}. No new cheque can be debited before ${dday(cap.lastBad.date)} without making that worse.</div>`;
+ const rows=cap.dates.filter(x=>isWorkDay(x.chq)).slice(0,10);
+ h+=`<details style="margin-top:8px" ${sd.amount?'':'open'}><summary>Room on each cheque date (account ${esc(accName(acc))})</summary><div class="tw" style="max-height:none;margin-top:6px"><table><thead><tr><th>Cheque date</th><th>Reaches account</th><th class="n">Largest safe amount</th><th>Tightest day after</th></tr></thead><tbody>
+ ${rows.map(x=>`<tr><td>${dday(x.chq)}</td><td>${dday(x.debit)}</td><td class="n ${x.max?'':'neg'}">${x.max?fmt(x.max):'none'}</td><td class="small muted">${dday(x.worst)}</td></tr>`).join('')}</tbody></table></div></details>
+ <p class="muted small">Checked against the bank position on ${dmy(f.asOf)} and every upcoming item up to ${dmy(cap.cover)}${S.settings.baseline?' plus the typical monthly flow':''}. Later dates are unknown, so they are not offered.</p></div>`;
+ return h;
+}
+ACT.sdFind=()=>{const a=+$('#sdA').value;if(!(a>0))return toast('Enter the amount.');S.ui.sdc={acc:$('#sdAcc').value,amount:round2(a),party:$('#sdP').value.trim(),notBefore:$('#sdN').value||''};rerender();};
+ACT.sdAdd=async b=>{const sd=S.ui.sdc;if(!sd)return;const p={id:uid(),acc:sd.acc,kind:'CHQ_OUT',date:b.dataset.date,amount:round2(+b.dataset.amt),party:sd.party,chq:'',bank:'',flexible:false,note:'Dated with the safe-date check',status:'open',created:Date.now()};
+ await DB.put('plans',p);S.plans.push(p);S.ui.sdc=null;toast('Added to our issued cheques.');rerender();};
 
 /* ---- Events & start ---- */
 CHG.accSel=el=>{S.ui.acc=el.value;render();};
